@@ -1,0 +1,72 @@
+{
+  "source": "data/locust_history_sample.csv",
+  "baseline_source": null,
+  "verdict": "PASS",
+  "summary": {
+    "samples": 1,
+    "latest": {
+      "timestamp": "1789119837",
+      "users": 10.0,
+      "requests": 100.0,
+      "failures": 0.0,
+      "avg_ms": 20.5,
+      "p95_ms": 30.0,
+      "p99_ms": 30.0,
+      "rps": 31.5,
+      "cpu_percent": null,
+      "memory_percent": null,
+      "error_rate_percent": 0.0
+    },
+    "peak": {
+      "users": 10.0,
+      "avg_ms": 20.5,
+      "p95_ms": 30.0,
+      "p99_ms": 30.0,
+      "error_rate_percent": 0.0,
+      "rps": 31.5,
+      "cpu_percent": null,
+      "memory_percent": null
+    },
+    "median": {
+      "p95_ms": 30.0,
+      "p99_ms": 30.0,
+      "rps": 31.5
+    }
+  },
+  "baseline_summary": null,
+  "thresholds": {
+    "p95_ms_max": 250.0,
+    "p99_ms_max": 500.0,
+    "error_rate_percent_max": 1.0,
+    "regression_percent_max": 20.0,
+    "cpu_percent_max": 80.0,
+    "memory_percent_max": 85.0
+  },
+  "findings": [
+    {
+      "kind": "threshold",
+      "metric": "p95_ms",
+      "actual": 30.0,
+      "limit": 250.0,
+      "status": "PASS"
+    },
+    {
+      "kind": "threshold",
+      "metric": "p99_ms",
+      "actual": 30.0,
+      "limit": 500.0,
+      "status": "PASS"
+    },
+    {
+      "kind": "threshold",
+      "metric": "error_rate_percent",
+      "actual": 0.0,
+      "limit": 1.0,
+      "status": "PASS"
+    }
+  ],
+  "limitations": [
+    "Metrics alone do not establish root cause.",
+    "Capacity conclusions apply only to the tested workload, duration, environment, and data volume."
+  ]
+}

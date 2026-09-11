@@ -1,0 +1,8 @@
+{
+  "p95_ms_max": 250.0,
+  "p99_ms_max": 500.0,
+  "error_rate_percent_max": 1.0,
+  "regression_percent_max": 20.0,
+  "cpu_percent_max": 80.0,
+  "memory_percent_max": 85.0
+}

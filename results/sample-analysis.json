@@ -1,0 +1,134 @@
+{
+  "source": "data/degraded.csv",
+  "baseline_source": "data/baseline.csv",
+  "verdict": "FAIL",
+  "summary": {
+    "samples": 3,
+    "latest": {
+      "timestamp": "2026-09-11T11:02:00Z",
+      "users": 50.0,
+      "requests": 1500.0,
+      "failures": 30.0,
+      "avg_ms": 188.0,
+      "p95_ms": 380.0,
+      "p99_ms": 650.0,
+      "rps": 38.0,
+      "cpu_percent": 91.0,
+      "memory_percent": 57.0,
+      "error_rate_percent": 2.0
+    },
+    "peak": {
+      "users": 50.0,
+      "avg_ms": 188.0,
+      "p95_ms": 380.0,
+      "p99_ms": 650.0,
+      "error_rate_percent": 2.0,
+      "rps": 42.0,
+      "cpu_percent": 91.0,
+      "memory_percent": 57.0
+    },
+    "median": {
+      "p95_ms": 190.0,
+      "p99_ms": 310.0,
+      "rps": 38.0
+    }
+  },
+  "baseline_summary": {
+    "samples": 3,
+    "latest": {
+      "timestamp": "2026-09-11T10:02:00Z",
+      "users": 50.0,
+      "requests": 1500.0,
+      "failures": 2.0,
+      "avg_ms": 66.0,
+      "p95_ms": 105.0,
+      "p99_ms": 155.0,
+      "rps": 52.0,
+      "cpu_percent": 58.0,
+      "memory_percent": 51.0,
+      "error_rate_percent": 0.133
+    },
+    "peak": {
+      "users": 50.0,
+      "avg_ms": 66.0,
+      "p95_ms": 105.0,
+      "p99_ms": 155.0,
+      "error_rate_percent": 0.133,
+      "rps": 52.0,
+      "cpu_percent": 58.0,
+      "memory_percent": 51.0
+    },
+    "median": {
+      "p95_ms": 75.0,
+      "p99_ms": 110.0,
+      "rps": 45.0
+    }
+  },
+  "thresholds": {
+    "p95_ms_max": 250.0,
+    "p99_ms_max": 500.0,
+    "error_rate_percent_max": 1.0,
+    "regression_percent_max": 20.0,
+    "cpu_percent_max": 80.0,
+    "memory_percent_max": 85.0
+  },
+  "findings": [
+    {
+      "kind": "threshold",
+      "metric": "p95_ms",
+      "actual": 380.0,
+      "limit": 250.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "threshold",
+      "metric": "p99_ms",
+      "actual": 650.0,
+      "limit": 500.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "threshold",
+      "metric": "error_rate_percent",
+      "actual": 2.0,
+      "limit": 1.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "threshold",
+      "metric": "cpu_percent",
+      "actual": 91.0,
+      "limit": 80.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "threshold",
+      "metric": "memory_percent",
+      "actual": 57.0,
+      "limit": 85.0,
+      "status": "PASS"
+    },
+    {
+      "kind": "regression",
+      "metric": "p95_ms",
+      "baseline": 105.0,
+      "current": 380.0,
+      "change_percent": 261.9,
+      "limit_percent": 20.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "regression",
+      "metric": "p99_ms",
+      "baseline": 155.0,
+      "current": 650.0,
+      "change_percent": 319.35,
+      "limit_percent": 20.0,
+      "status": "FAIL"
+    }
+  ],
+  "limitations": [
+    "Metrics alone do not establish root cause.",
+    "Capacity conclusions apply only to the tested workload, duration, environment, and data volume."
+  ]
+}

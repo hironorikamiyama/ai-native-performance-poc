@@ -1,0 +1,4 @@
+interface:
+  display_name: "Performance Test Analysis"
+  short_description: "Analyze load-test results and performance risk"
+  default_prompt: "Analyze the supplied performance-test results, separate evidence from hypotheses, and recommend the next checks."

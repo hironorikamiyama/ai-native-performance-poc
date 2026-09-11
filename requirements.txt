@@ -1,0 +1,5 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+locust==2.40.4
+pytest==8.4.2
+httpx==0.28.1
