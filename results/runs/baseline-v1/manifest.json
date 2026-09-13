@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "run_id": "baseline-v1",
+  "started_at_utc": "2026-09-13T02:39:32.738343+00:00",
+  "completed_at_utc": "2026-09-13T02:40:33.301241+00:00",
+  "status": "COMPLETED",
+  "exit_code": 0,
+  "plan_id": "ai-native-performance-poc-v2",
+  "assumption_status": "provisional",
+  "scenario_name": "baseline",
+  "scenario_purpose": "正常ビルドの比較基準を取得する",
+  "tool": {
+    "name": "Locust",
+    "version": "2.40.4",
+    "execution_mode": "headless",
+    "scenario_file": "loadtest/locustfile.py"
+  },
+  "target": {
+    "base_url": "http://127.0.0.1:8000",
+    "environment": "local-poc",
+    "dataset_id": "synthetic-items-v1"
+  },
+  "workload_signature": {
+    "users": 50,
+    "spawn_rate": 10,
+    "duration": "60s",
+    "task_profile": "items-90_health-10"
+  },
+  "target_behavior": {
+    "delay_ms": 20,
+    "fail_rate": 0.0
+  },
+  "output": {
+    "primary_format": "locust_stats_history_csv",
+    "primary_file_suffix": "_stats_history.csv",
+    "metadata_format": "json",
+    "analysis_formats": [
+      "json",
+      "markdown"
+    ]
+  },
+  "command": [
+    "/home/kamiyama/projects/performance-ai-poc/.venv/bin/python",
+    "-m",
+    "locust",
+    "-f",
+    "loadtest/locustfile.py",
+    "--headless",
+    "-u",
+    "50",
+    "-r",
+    "10",
+    "-t",
+    "60s",
+    "--host",
+    "http://127.0.0.1:8000",
+    "--csv",
+    "/home/kamiyama/projects/performance-ai-poc/results/runs/baseline-v1/locust"
+  ],
+  "test_plan_sha256": "a61c8332b566db14e3eb728c6fc5ed4f4aeec56e2cf924395f6cd7fd9c3d1d56"
+}

@@ -1,8 +1,17 @@
 {
-  "p95_ms_max": 250.0,
-  "p99_ms_max": 500.0,
-  "error_rate_percent_max": 1.0,
-  "regression_percent_max": 20.0,
-  "cpu_percent_max": 80.0,
-  "memory_percent_max": 85.0
+  "policy_id": "poc-provisional-v2",
+  "assumption_status": "provisional",
+  "service_fail": {
+    "p95_ms_max": 250.0,
+    "p99_ms_max": 500.0,
+    "error_rate_percent_max": 1.0
+  },
+  "resource_warning": {
+    "cpu_percent_max": 80.0,
+    "memory_percent_max": 85.0
+  },
+  "regression_fail": {
+    "p95_ms_percent_max": 20.0,
+    "p99_ms_percent_max": 20.0
+  }
 }

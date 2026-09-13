@@ -1,6 +1,6 @@
 # Performance Test Analysis
 
-**Verdict: FAIL**
+**Service verdict: FAIL**
 
 ## Deterministic evidence
 
@@ -18,7 +18,7 @@
 - FAIL: p95_ms=380.0 (limit 250.0)
 - FAIL: p99_ms=650.0 (limit 500.0)
 - FAIL: error_rate_percent=2.0 (limit 1.0)
-- FAIL: cpu_percent=91.0 (limit 80.0)
+- WARN: cpu_percent=91.0 (limit 80.0)
 - PASS: memory_percent=57.0 (limit 85.0)
 - FAIL: p95_ms changed 261.9% (105.0 -> 380.0; limit 20.0%)
 - FAIL: p99_ms changed 319.35% (155.0 -> 650.0; limit 20.0%)

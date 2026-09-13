@@ -111,40 +111,62 @@ def summarize(rows: list[MetricRow]) -> dict[str, Any]:
     }
 
 
-def evaluate(summary: dict[str, Any], thresholds: dict[str, float]) -> list[dict[str, Any]]:
+def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
     checks = [
-        ("p95_ms", summary["peak"]["p95_ms"], "p95_ms_max"),
-        ("p99_ms", summary["peak"]["p99_ms"], "p99_ms_max"),
-        ("error_rate_percent", summary["peak"]["error_rate_percent"], "error_rate_percent_max"),
-        ("cpu_percent", summary["peak"]["cpu_percent"], "cpu_percent_max"),
-        ("memory_percent", summary["peak"]["memory_percent"], "memory_percent_max"),
+        ("service", "p95_ms", summary["peak"]["p95_ms"], policy["service_fail"].get("p95_ms_max"), "FAIL"),
+        ("service", "p99_ms", summary["peak"]["p99_ms"], policy["service_fail"].get("p99_ms_max"), "FAIL"),
+        (
+            "service",
+            "error_rate_percent",
+            summary["peak"]["error_rate_percent"],
+            policy["service_fail"].get("error_rate_percent_max"),
+            "FAIL",
+        ),
+        (
+            "resource",
+            "cpu_percent",
+            summary["peak"]["cpu_percent"],
+            policy["resource_warning"].get("cpu_percent_max"),
+            "WARN",
+        ),
+        (
+            "resource",
+            "memory_percent",
+            summary["peak"]["memory_percent"],
+            policy["resource_warning"].get("memory_percent_max"),
+            "WARN",
+        ),
     ]
     findings = []
-    for metric, actual, threshold_key in checks:
-        if actual is None or threshold_key not in thresholds:
+    for category, metric, actual, limit, breach_status in checks:
+        if actual is None or limit is None:
             continue
-        limit = thresholds[threshold_key]
         findings.append(
             {
                 "kind": "threshold",
+                "category": category,
                 "metric": metric,
                 "actual": actual,
                 "limit": limit,
-                "status": "FAIL" if actual > limit else "PASS",
+                "status": breach_status if actual > limit else "PASS",
             }
         )
     return findings
 
 
-def compare_baseline(current: dict[str, Any], baseline: dict[str, Any], limit: float) -> list[dict[str, Any]]:
+def compare_baseline(
+    current: dict[str, Any], baseline: dict[str, Any], regression_policy: dict[str, float]
+) -> list[dict[str, Any]]:
     findings = []
     for metric in ("p95_ms", "p99_ms"):
         before = baseline["peak"][metric]
         after = current["peak"][metric]
         change = ((after - before) / before * 100) if before else 0.0
+        limit = regression_policy[f"{metric}_percent_max"]
         findings.append(
             {
                 "kind": "regression",
+                "category": "service",
                 "metric": metric,
                 "baseline": before,
                 "current": after,
@@ -161,7 +183,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Performance Test Analysis",
         "",
-        f"**Verdict: {report['verdict']}**",
+        f"**Service verdict: {report['verdict']}**",
         "",
         "## Deterministic evidence",
         "",
@@ -183,6 +205,9 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- {item['status']}: {item['metric']} changed {item['change_percent']}% "
                 f"({item['baseline']} -> {item['current']}; limit {item['limit_percent']}%)"
             )
+    if report["comparability"]:
+        lines.extend(["", "## Baseline comparability", ""])
+        lines.append(f"- {report['comparability']['status']}: {report['comparability']['message']}")
     lines.extend(
         [
             "",
@@ -197,22 +222,51 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_report(result_path: Path, thresholds_path: Path, baseline_path: Path | None = None) -> dict[str, Any]:
-    thresholds = json.loads(thresholds_path.read_text(encoding="utf-8"))
+def compare_manifests(current_path: Path, baseline_path: Path) -> dict[str, Any]:
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    fields = ("tool", "target", "workload_signature")
+    mismatches = [field for field in fields if current.get(field) != baseline.get(field)]
+    if mismatches:
+        return {
+            "status": "NOT_COMPARABLE",
+            "message": f"Manifest mismatch: {', '.join(mismatches)}",
+            "mismatches": mismatches,
+        }
+    return {"status": "COMPARABLE", "message": "Tool, target, and workload signature match.", "mismatches": []}
+
+
+def build_report(
+    result_path: Path,
+    thresholds_path: Path,
+    baseline_path: Path | None = None,
+    manifest_path: Path | None = None,
+    baseline_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    policy = json.loads(thresholds_path.read_text(encoding="utf-8"))
     summary = summarize(load_rows(result_path))
-    findings = evaluate(summary, thresholds)
+    findings = evaluate(summary, policy)
     baseline_summary = None
+    comparability = None
+    if bool(manifest_path) != bool(baseline_manifest_path):
+        raise ValueError("Both --manifest and --baseline-manifest are required together")
+    if manifest_path and baseline_manifest_path:
+        comparability = compare_manifests(manifest_path, baseline_manifest_path)
     if baseline_path:
         baseline_summary = summarize(load_rows(baseline_path))
-        findings.extend(compare_baseline(summary, baseline_summary, thresholds["regression_percent_max"]))
+        if comparability is None or comparability["status"] == "COMPARABLE":
+            findings.extend(compare_baseline(summary, baseline_summary, policy["regression_fail"]))
+    has_failures = any(item["status"] == "FAIL" for item in findings)
+    has_warnings = any(item["status"] == "WARN" for item in findings)
     return {
         "source": str(result_path),
         "baseline_source": str(baseline_path) if baseline_path else None,
-        "verdict": "FAIL" if any(item["status"] == "FAIL" for item in findings) else "PASS",
+        "verdict": "FAIL" if has_failures else ("PASS_WITH_WARNINGS" if has_warnings else "PASS"),
         "summary": summary,
         "baseline_summary": baseline_summary,
-        "thresholds": thresholds,
+        "policy": policy,
         "findings": findings,
+        "comparability": comparability,
         "limitations": [
             "Metrics alone do not establish root cause.",
             "Capacity conclusions apply only to the tested workload, duration, environment, and data volume.",
@@ -225,11 +279,19 @@ def main() -> None:
     parser.add_argument("result", type=Path)
     parser.add_argument("--thresholds", required=True, type=Path)
     parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--baseline-manifest", type=Path)
     parser.add_argument("--output-json", type=Path, default=Path("analysis.json"))
     parser.add_argument("--output-md", type=Path, default=Path("analysis.md"))
     args = parser.parse_args()
 
-    report = build_report(args.result, args.thresholds, args.baseline)
+    report = build_report(
+        args.result,
+        args.thresholds,
+        args.baseline,
+        args.manifest,
+        args.baseline_manifest,
+    )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_md.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

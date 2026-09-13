@@ -64,17 +64,27 @@
       "rps": 45.0
     }
   },
-  "thresholds": {
-    "p95_ms_max": 250.0,
-    "p99_ms_max": 500.0,
-    "error_rate_percent_max": 1.0,
-    "regression_percent_max": 20.0,
-    "cpu_percent_max": 80.0,
-    "memory_percent_max": 85.0
+  "policy": {
+    "policy_id": "poc-provisional-v2",
+    "assumption_status": "provisional",
+    "service_fail": {
+      "p95_ms_max": 250.0,
+      "p99_ms_max": 500.0,
+      "error_rate_percent_max": 1.0
+    },
+    "resource_warning": {
+      "cpu_percent_max": 80.0,
+      "memory_percent_max": 85.0
+    },
+    "regression_fail": {
+      "p95_ms_percent_max": 20.0,
+      "p99_ms_percent_max": 20.0
+    }
   },
   "findings": [
     {
       "kind": "threshold",
+      "category": "service",
       "metric": "p95_ms",
       "actual": 380.0,
       "limit": 250.0,
@@ -82,6 +92,7 @@
     },
     {
       "kind": "threshold",
+      "category": "service",
       "metric": "p99_ms",
       "actual": 650.0,
       "limit": 500.0,
@@ -89,6 +100,7 @@
     },
     {
       "kind": "threshold",
+      "category": "service",
       "metric": "error_rate_percent",
       "actual": 2.0,
       "limit": 1.0,
@@ -96,13 +108,15 @@
     },
     {
       "kind": "threshold",
+      "category": "resource",
       "metric": "cpu_percent",
       "actual": 91.0,
       "limit": 80.0,
-      "status": "FAIL"
+      "status": "WARN"
     },
     {
       "kind": "threshold",
+      "category": "resource",
       "metric": "memory_percent",
       "actual": 57.0,
       "limit": 85.0,
@@ -110,6 +124,7 @@
     },
     {
       "kind": "regression",
+      "category": "service",
       "metric": "p95_ms",
       "baseline": 105.0,
       "current": 380.0,
@@ -119,6 +134,7 @@
     },
     {
       "kind": "regression",
+      "category": "service",
       "metric": "p99_ms",
       "baseline": 155.0,
       "current": 650.0,
@@ -127,6 +143,7 @@
       "status": "FAIL"
     }
   ],
+  "comparability": null,
   "limitations": [
     "Metrics alone do not establish root cause.",
     "Capacity conclusions apply only to the tested workload, duration, environment, and data volume."

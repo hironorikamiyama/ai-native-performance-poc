@@ -1,0 +1,139 @@
+{
+  "source": "results/runs/regression-v1/locust_stats_history.csv",
+  "baseline_source": "results/runs/baseline-v1/locust_stats_history.csv",
+  "verdict": "FAIL",
+  "summary": {
+    "samples": 55,
+    "latest": {
+      "timestamp": "1789267362",
+      "users": 50.0,
+      "requests": 4233.0,
+      "failures": 112.0,
+      "avg_ms": 324.92846545389216,
+      "p95_ms": 360.0,
+      "p99_ms": 370.0,
+      "rps": 79.6,
+      "cpu_percent": null,
+      "memory_percent": null,
+      "error_rate_percent": 2.646
+    },
+    "peak": {
+      "users": 50.0,
+      "avg_ms": 327.60906440633545,
+      "p95_ms": 380.0,
+      "p99_ms": 390.0,
+      "error_rate_percent": 6.667,
+      "rps": 80.7,
+      "cpu_percent": null,
+      "memory_percent": null
+    },
+    "median": {
+      "p95_ms": 360.0,
+      "p99_ms": 370.0,
+      "rps": 79.5
+    }
+  },
+  "baseline_summary": {
+    "samples": 55,
+    "latest": {
+      "timestamp": "1789267229",
+      "users": 50.0,
+      "requests": 8190.0,
+      "failures": 0.0,
+      "avg_ms": 25.56683582583562,
+      "p95_ms": 40.0,
+      "p99_ms": 59.0,
+      "rps": 153.2,
+      "cpu_percent": null,
+      "memory_percent": null,
+      "error_rate_percent": 0.0
+    },
+    "peak": {
+      "users": 50.0,
+      "avg_ms": 30.706397726861105,
+      "p95_ms": 64.0,
+      "p99_ms": 88.0,
+      "error_rate_percent": 0.0,
+      "rps": 155.5,
+      "cpu_percent": null,
+      "memory_percent": null
+    },
+    "median": {
+      "p95_ms": 43.0,
+      "p99_ms": 66.0,
+      "rps": 153.4
+    }
+  },
+  "policy": {
+    "policy_id": "poc-provisional-v2",
+    "assumption_status": "provisional",
+    "service_fail": {
+      "p95_ms_max": 250.0,
+      "p99_ms_max": 500.0,
+      "error_rate_percent_max": 1.0
+    },
+    "resource_warning": {
+      "cpu_percent_max": 80.0,
+      "memory_percent_max": 85.0
+    },
+    "regression_fail": {
+      "p95_ms_percent_max": 20.0,
+      "p99_ms_percent_max": 20.0
+    }
+  },
+  "findings": [
+    {
+      "kind": "threshold",
+      "category": "service",
+      "metric": "p95_ms",
+      "actual": 380.0,
+      "limit": 250.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "threshold",
+      "category": "service",
+      "metric": "p99_ms",
+      "actual": 390.0,
+      "limit": 500.0,
+      "status": "PASS"
+    },
+    {
+      "kind": "threshold",
+      "category": "service",
+      "metric": "error_rate_percent",
+      "actual": 6.667,
+      "limit": 1.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "regression",
+      "category": "service",
+      "metric": "p95_ms",
+      "baseline": 64.0,
+      "current": 380.0,
+      "change_percent": 493.75,
+      "limit_percent": 20.0,
+      "status": "FAIL"
+    },
+    {
+      "kind": "regression",
+      "category": "service",
+      "metric": "p99_ms",
+      "baseline": 88.0,
+      "current": 390.0,
+      "change_percent": 343.18,
+      "limit_percent": 20.0,
+      "status": "FAIL"
+    }
+  ],
+  "comparability": {
+    "status": "COMPARABLE",
+    "message": "Tool, target, and workload signature match.",
+    "mismatches": []
+  },
+  "limitations": [
+    "Metrics alone do not establish root cause.",
+    "Capacity conclusions apply only to the tested workload, duration, environment, and data volume."
+  ]
+}

@@ -9,11 +9,13 @@ Turn performance-test measurements into a reviewable engineering assessment.
 
 ## Workflow
 
-1. Confirm the target CSV, thresholds, and optional baseline CSV. If acceptance criteria are missing, label conclusions as provisional.
-2. Run `scripts/analyze_results.py` to produce deterministic JSON and Markdown evidence. Prefer calculations from the script over mental arithmetic.
-3. Separate observations from hypotheses. An observation must quote a calculated metric, threshold, or comparison. A cause is a hypothesis unless supported by application, database, or infrastructure evidence.
-4. Report threshold violations, baseline regressions, risk, and the next measurement needed to confirm each hypothesis.
-5. Require human review before a release decision.
+1. Confirm the result CSV, evaluation policy, run manifest, and optional baseline pair. If acceptance criteria are provisional, keep that status in the report.
+2. When comparing runs, inspect both manifests. Do not calculate regression when tool, target, dataset, or workload signature differs.
+3. Run `scripts/analyze_results.py` to produce deterministic JSON and Markdown evidence. Prefer calculations from the script over mental arithmetic.
+4. Treat service-level breaches as `FAIL` and resource pressure as `WARN`; CPU or memory alone does not prove user impact.
+5. Separate observations from hypotheses. An observation must quote a calculated metric, threshold, or comparison. A cause is a hypothesis unless supported by application, database, or infrastructure evidence.
+6. Report threshold violations, baseline regressions, risk, and the next measurement needed to confirm each hypothesis.
+7. Require human review before a release decision.
 
 ## Command
 
@@ -24,7 +26,12 @@ python scripts/analyze_results.py RESULT.csv --thresholds THRESHOLDS.json \
   --output-json analysis.json --output-md analysis.md
 ```
 
-Add `--baseline BASELINE.csv` when a comparable prior run exists.
+For a controlled comparison, add all three options:
+
+```bash
+--baseline BASELINE.csv --manifest RUN_MANIFEST.json \
+--baseline-manifest BASELINE_MANIFEST.json
+```
 
 ## Input
 
@@ -40,6 +47,7 @@ The script also recognizes core columns from Locust `*_stats_history.csv` output
 - Do not attribute latency to CPU, database, network, or code without corroborating metrics or traces.
 - A passing sample does not prove production capacity beyond the tested load and duration.
 - Compare runs only when workload, environment, data volume, and configuration are sufficiently similar.
+- Keep service acceptance criteria separate from diagnostic resource thresholds.
 - Mention data-quality limitations and omitted metrics.
 
 Return a concise assessment containing: verdict, evidence, regressions, plausible hypotheses, additional checks, and human-review points. Keep deterministic values unchanged from the generated evidence.

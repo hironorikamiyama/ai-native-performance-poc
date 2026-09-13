@@ -1,0 +1,2 @@
+timestamp,users,requests,failures,avg_ms,p95_ms,p99_ms,rps,cpu_percent,memory_percent
+2026-09-11T12:00:00Z,50,1500,0,70,120,180,50,92,60

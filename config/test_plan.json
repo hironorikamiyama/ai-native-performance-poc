@@ -1,0 +1,59 @@
+{
+  "plan_id": "ai-native-performance-poc-v2",
+  "assumption_status": "provisional",
+  "tool": {
+    "name": "Locust",
+    "version": "2.40.4",
+    "execution_mode": "headless",
+    "scenario_file": "loadtest/locustfile.py"
+  },
+  "target": {
+    "base_url": "http://127.0.0.1:8000",
+    "environment": "local-poc",
+    "dataset_id": "synthetic-items-v1"
+  },
+  "output": {
+    "primary_format": "locust_stats_history_csv",
+    "primary_file_suffix": "_stats_history.csv",
+    "metadata_format": "json",
+    "analysis_formats": ["json", "markdown"]
+  },
+  "scenarios": {
+    "smoke": {
+      "purpose": "疎通確認。性能判定には使用しない",
+      "users": 2,
+      "spawn_rate": 1,
+      "duration": "15s",
+      "delay_ms": 20,
+      "fail_rate": 0.0,
+      "task_profile": "items-90_health-10"
+    },
+    "baseline": {
+      "purpose": "正常ビルドの比較基準を取得する",
+      "users": 50,
+      "spawn_rate": 10,
+      "duration": "60s",
+      "delay_ms": 20,
+      "fail_rate": 0.0,
+      "task_profile": "items-90_health-10"
+    },
+    "regression": {
+      "purpose": "同一負荷条件で性能劣化を再現する",
+      "users": 50,
+      "spawn_rate": 10,
+      "duration": "60s",
+      "delay_ms": 350,
+      "fail_rate": 0.03,
+      "task_profile": "items-90_health-10"
+    },
+    "stress": {
+      "purpose": "限界点探索。通常の合否判定とは分離する",
+      "users": 200,
+      "spawn_rate": 20,
+      "duration": "180s",
+      "delay_ms": 20,
+      "fail_rate": 0.0,
+      "task_profile": "items-90_health-10"
+    }
+  }
+}
