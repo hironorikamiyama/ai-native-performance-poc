@@ -69,6 +69,7 @@ curl "http://127.0.0.1:8000/items?delay_ms=20&fail_rate=0&limit=3"
 ## 2. シナリオと判定基準を確認
 
 負荷条件は`config/test_plan.json`、判定方針は`config/thresholds.json`にあります。
+`config/thresholds.json`の`evaluation.warmup_seconds`には、評価対象から除外する試験開始直後の秒数を指定します。現在はPoC用の暫定値として10秒に設定しています。
 
 - `smoke`: 疎通確認（2ユーザー、15秒）
 - `baseline`: 比較元（50ユーザー、60秒）
@@ -125,6 +126,28 @@ python performance-test-analysis/scripts/analyze_results.py \
 ```
 
 ツール、対象環境、ユーザー数、増加率、継続時間、タスク比率が一致しなければ`NOT_COMPARABLE`となり、回帰判定を抑止します。LocustだけではCPU・メモリが入らないため、レポートには未取得と表示されます。本番想定ではCloudWatch、Azure Monitor、Prometheusなどの監視データとの時刻突合が次の拡張です。
+
+### ウォームアップ区間の扱い
+
+試験開始直後は、ユーザーの増加途中でリクエスト件数も少ないため、一時的な応答時間やエラー率が過大に見える場合があります。このPoCでは、`evaluation.warmup_seconds`で指定した秒数以内の測定行を、ピーク値と中央値の評価対象から除外します。
+
+レポートには、設定したウォームアップ秒数と除外した行数を出力します。
+
+```text
+## Evaluation window
+
+- Warm-up seconds: 10
+- Current rows excluded: 10
+- Baseline rows excluded: 10
+
+
+### 変更3：評価観点を追加
+
+「PoCの評価観点」に、次の項目を追加します。
+
+```markdown
+- ウォームアップ区間がbaselineと比較対象の両方から同じ条件で除外されるか
+- 除外後もLocustの累積値にはウォームアップ中の影響が残ることを明示できているか
 
 ## 6. 判定の責任分界
 

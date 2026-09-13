@@ -1,4 +1,8 @@
 import importlib.util
+import json
+import sys
+from pathlib import Path
+
 import sys
 from pathlib import Path
 
@@ -34,22 +38,54 @@ def test_baseline_passes() -> None:
 
 
 def test_locust_history_skips_initial_na_row() -> None:
-    report = MODULE.build_report(
-        ROOT / "data" / "locust_history_sample.csv",
-        ROOT / "config" / "thresholds.json",
+    rows = MODULE.load_rows(
+        ROOT / "data" / "locust_history_sample.csv"
     )
-    assert report["verdict"] == "PASS"
-    assert report["summary"]["samples"] == 1
-    assert report["summary"]["peak"]["p95_ms"] == 30
+
+    assert len(rows) == 1
+    assert rows[0].p95_ms == 30
 
 
-def test_resource_limit_is_warning_not_service_failure() -> None:
+def test_exclude_warmup_rows() -> None:
+    rows = MODULE.load_rows(ROOT / "data" / "baseline.csv")
+
+    evaluated_rows, excluded_count = MODULE.exclude_warmup(
+        rows,
+        warmup_seconds=10,
+    )
+
+    assert excluded_count == 1
+    assert len(evaluated_rows) == 2
+    assert evaluated_rows[0].timestamp == "2026-09-11T10:01:00Z"
+
+
+def test_resource_limit_is_warning_not_service_failure(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads(
+        (ROOT / "config" / "thresholds.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    policy["evaluation"]["warmup_seconds"] = 0
+
+    policy_path = tmp_path / "thresholds.json"
+    policy_path.write_text(
+        json.dumps(policy),
+        encoding="utf-8",
+    )
+
     report = MODULE.build_report(
         ROOT / "data" / "resource_warning.csv",
-        ROOT / "config" / "thresholds.json",
+        policy_path,
     )
+
     assert report["verdict"] == "PASS_WITH_WARNINGS"
-    assert any(x["metric"] == "cpu_percent" and x["status"] == "WARN" for x in report["findings"])
+    assert any(
+        finding["metric"] == "cpu_percent"
+        and finding["status"] == "WARN"
+        for finding in report["findings"]
+    )
 
 
 def test_manifest_mismatch_suppresses_regression_judgement(tmp_path: Path) -> None:
@@ -61,8 +97,8 @@ def test_manifest_mismatch_suppresses_regression_judgement(tmp_path: Path) -> No
     baseline = {**current, "workload_signature": {"users": 20}}
     current_path = tmp_path / "current.json"
     baseline_path = tmp_path / "baseline.json"
-    current_path.write_text(__import__("json").dumps(current), encoding="utf-8")
-    baseline_path.write_text(__import__("json").dumps(baseline), encoding="utf-8")
+    current_path.write_text(json.dumps(current), encoding="utf-8")
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
 
     report = MODULE.build_report(
         ROOT / "data" / "degraded.csv",

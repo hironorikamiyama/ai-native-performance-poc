@@ -1,6 +1,9 @@
 {
-  "policy_id": "poc-provisional-v2",
+  "policy_id": "poc-provisional-v3",
   "assumption_status": "provisional",
+  "evaluation": {
+    "warmup_seconds": 10
+  },
   "service_fail": {
     "p95_ms_max": 250.0,
     "p99_ms_max": 500.0,

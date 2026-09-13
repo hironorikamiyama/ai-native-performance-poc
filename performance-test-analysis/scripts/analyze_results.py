@@ -8,6 +8,7 @@ import csv
 import json
 import statistics
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,41 @@ def load_rows(path: Path) -> list[MetricRow]:
     if not rows:
         raise ValueError(f"No complete numeric metric rows found in {path}")
     return rows
+
+
+def parse_timestamp(value: str) -> float:
+    """Convert epoch or ISO 8601 timestamp text to seconds."""
+    try:
+        return float(value)
+    except ValueError:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def exclude_warmup(
+    rows: list[MetricRow],
+    warmup_seconds: float,
+) -> tuple[list[MetricRow], int]:
+    """Exclude measurement rows within the warm-up period."""
+    if warmup_seconds < 0:
+        raise ValueError("warmup_seconds must be zero or greater")
+
+    if warmup_seconds == 0:
+        return rows, 0
+
+    started_at = parse_timestamp(rows[0].timestamp)
+    cutoff = started_at + warmup_seconds
+    evaluated_rows = [
+        row for row in rows
+        if parse_timestamp(row.timestamp) >= cutoff
+    ]
+
+    if not evaluated_rows:
+        raise ValueError(
+            f"No rows remain after excluding {warmup_seconds} warm-up seconds"
+        )
+
+    excluded_count = len(rows) - len(evaluated_rows)
+    return evaluated_rows, excluded_count
 
 
 def summarize(rows: list[MetricRow]) -> dict[str, Any]:
@@ -180,20 +216,39 @@ def compare_baseline(
 
 def render_markdown(report: dict[str, Any]) -> str:
     peak = report["summary"]["peak"]
+    evaluation = report["evaluation"]
     lines = [
         "# Performance Test Analysis",
         "",
         f"**Service verdict: {report['verdict']}**",
         "",
-        "## Deterministic evidence",
+        "## Evaluation window",
         "",
-        f"- Samples: {report['summary']['samples']}",
-        f"- Peak users: {peak['users']:.0f}",
-        f"- Peak p95: {peak['p95_ms']:.2f} ms",
-        f"- Peak p99: {peak['p99_ms']:.2f} ms",
-        f"- Peak error rate: {peak['error_rate_percent']:.3f}%",
-        f"- Peak throughput: {peak['rps']:.2f} requests/s",
+        f"- Warm-up seconds: {evaluation['warmup_seconds']:.0f}",
+        f"- Current rows excluded: {evaluation['excluded_rows']}",
     ]
+
+    if evaluation["baseline_excluded_rows"] is not None:
+        lines.append(
+            "- Baseline rows excluded: "
+            f"{evaluation['baseline_excluded_rows']}"
+        )
+
+    lines.extend(
+        [
+            "- Limitation: Locust percentile and request counters "
+            "remain cumulative.",
+            "",
+            "## Deterministic evidence",
+            "",
+            f"- Samples: {report['summary']['samples']}",
+            f"- Peak users: {peak['users']:.0f}",
+            f"- Peak p95: {peak['p95_ms']:.2f} ms",
+            f"- Peak p99: {peak['p99_ms']:.2f} ms",
+            f"- Peak error rate: {peak['error_rate_percent']:.3f}%",
+            f"- Peak throughput: {peak['rps']:.2f} requests/s",
+        ]
+    )
     lines.append("- CPU: not supplied" if peak["cpu_percent"] is None else f"- Peak CPU: {peak['cpu_percent']:.2f}%")
     lines.append("- Memory: not supplied" if peak["memory_percent"] is None else f"- Peak memory: {peak['memory_percent']:.2f}%")
     lines.extend(["", "## Checks", ""])
@@ -244,16 +299,35 @@ def build_report(
     baseline_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     policy = json.loads(thresholds_path.read_text(encoding="utf-8"))
-    summary = summarize(load_rows(result_path))
+    warmup_seconds = float(
+        policy.get("evaluation", {}).get("warmup_seconds", 0)
+    )
+
+    result_rows = load_rows(result_path)
+    evaluated_rows, excluded_rows = exclude_warmup(
+        result_rows,
+        warmup_seconds,
+    )
+    summary = summarize(evaluated_rows)
     findings = evaluate(summary, policy)
+
     baseline_summary = None
+    baseline_excluded_rows = None
     comparability = None
+
+
     if bool(manifest_path) != bool(baseline_manifest_path):
         raise ValueError("Both --manifest and --baseline-manifest are required together")
     if manifest_path and baseline_manifest_path:
         comparability = compare_manifests(manifest_path, baseline_manifest_path)
     if baseline_path:
-        baseline_summary = summarize(load_rows(baseline_path))
+        baseline_rows = load_rows(baseline_path)
+        evaluated_baseline_rows, baseline_excluded_rows = exclude_warmup(
+            baseline_rows,
+            warmup_seconds,
+        )
+        baseline_summary = summarize(evaluated_baseline_rows)
+
         if comparability is None or comparability["status"] == "COMPARABLE":
             findings.extend(compare_baseline(summary, baseline_summary, policy["regression_fail"]))
     has_failures = any(item["status"] == "FAIL" for item in findings)
@@ -265,6 +339,15 @@ def build_report(
         "summary": summary,
         "baseline_summary": baseline_summary,
         "policy": policy,
+        "evaluation": {
+            "warmup_seconds": warmup_seconds,
+            "excluded_rows": excluded_rows,
+            "baseline_excluded_rows": baseline_excluded_rows,
+            "note": (
+                "Rows within the warm-up period are excluded. "
+                "Locust percentile and request counters remain cumulative."
+            ),
+        },
         "findings": findings,
         "comparability": comparability,
         "limitations": [
