@@ -109,3 +109,33 @@ def test_manifest_mismatch_suppresses_regression_judgement(tmp_path: Path) -> No
     )
     assert report["comparability"]["status"] == "NOT_COMPARABLE"
     assert not any(x["kind"] == "regression" for x in report["findings"])
+
+
+def test_error_rate_uses_final_cumulative_value() -> None:
+    policy = json.loads(
+        (ROOT / "config" / "thresholds.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    summary = {
+        "latest": {
+            "error_rate_percent": 0.5,
+        },
+        "peak": {
+            "p95_ms": 100.0,
+            "p99_ms": 200.0,
+            "error_rate_percent": 5.0,
+            "cpu_percent": None,
+            "memory_percent": None,
+        },
+    }
+
+    findings = MODULE.evaluate(summary, policy)
+    error_finding = next(
+        finding
+        for finding in findings
+        if finding["metric"] == "error_rate_percent"
+    )
+
+    assert error_finding["actual"] == 0.5
+    assert error_finding["status"] == "PASS"

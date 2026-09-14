@@ -154,7 +154,7 @@ def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, 
         (
             "service",
             "error_rate_percent",
-            summary["peak"]["error_rate_percent"],
+            summary["latest"]["error_rate_percent"],
             policy["service_fail"].get("error_rate_percent_max"),
             "FAIL",
         ),
@@ -245,7 +245,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- Peak users: {peak['users']:.0f}",
             f"- Peak p95: {peak['p95_ms']:.2f} ms",
             f"- Peak p99: {peak['p99_ms']:.2f} ms",
-            f"- Peak error rate: {peak['error_rate_percent']:.3f}%",
+            "- Final cumulative error rate: "
+            f"{report['summary']['latest']['error_rate_percent']:.3f}%",
+            f"- Peak observed error rate: {peak['error_rate_percent']:.3f}%",
             f"- Peak throughput: {peak['rps']:.2f} requests/s",
         ]
     )
