@@ -45,6 +45,8 @@ def build_command(plan: dict[str, Any], scenario_name: str, csv_prefix: Path) ->
         "-f",
         plan["tool"]["scenario_file"],
         "--headless",
+        "--exit-code-on-error",
+        "0",
         "-u",
         str(scenario["users"]),
         "-r",
@@ -58,10 +60,18 @@ def build_command(plan: dict[str, Any], scenario_name: str, csv_prefix: Path) ->
     ]
 
 
-def create_manifest(plan: dict[str, Any], scenario_name: str, command: list[str], plan_path: Path) -> dict[str, Any]:
+def create_manifest(
+    plan: dict[str, Any],
+    scenario_name: str,
+    command: list[str],
+    plan_path: Path,
+    policy_path: Path,
+    warmup_seconds: float,
+) -> dict[str, Any]:
     scenario = plan["scenarios"][scenario_name]
+
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "run_id": None,
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "completed_at_utc": None,
@@ -78,9 +88,19 @@ def create_manifest(plan: dict[str, Any], scenario_name: str, command: list[str]
             "delay_ms": scenario["delay_ms"],
             "fail_rate": scenario["fail_rate"],
         },
+        "evaluation": {
+            "policy_file": plan["evaluation_policy_file"],
+            "warmup_seconds": warmup_seconds,
+            "stats_reset_mode": "locust_reset_all",
+            "policy_sha256": hashlib.sha256(
+                policy_path.read_bytes()
+            ).hexdigest(),
+        },
         "output": plan["output"],
         "command": command,
-        "test_plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "test_plan_sha256": hashlib.sha256(
+            plan_path.read_bytes()
+        ).hexdigest(),
     }
 
 
@@ -93,11 +113,28 @@ def main() -> None:
     args = parser.parse_args()
 
     plan = load_plan(args.plan)
+    policy_path = ROOT / plan["evaluation_policy_file"]
+    policy = json.loads(
+        policy_path.read_text(encoding="utf-8")
+    )
+    warmup_seconds = float(
+        policy.get("evaluation", {}).get(
+            "warmup_seconds",
+            0,
+        )
+    )
     run_id = args.run_id or f"{args.scenario}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     run_dir = ROOT / "results" / "runs" / run_id
     csv_prefix = run_dir / "locust"
     command = build_command(plan, args.scenario, csv_prefix)
-    manifest = create_manifest(plan, args.scenario, command, args.plan)
+    manifest = create_manifest(
+        plan,
+        args.scenario,
+        command,
+        args.plan,
+        policy_path,
+        warmup_seconds,
+    )
     manifest["run_id"] = run_id
 
     if args.dry_run:
@@ -112,6 +149,7 @@ def main() -> None:
     scenario = plan["scenarios"][args.scenario]
     env["POC_DELAY_MS"] = str(scenario["delay_ms"])
     env["POC_FAIL_RATE"] = str(scenario["fail_rate"])
+    env["POC_WARMUP_SECONDS"] = str(warmup_seconds)
     completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
 
     manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()

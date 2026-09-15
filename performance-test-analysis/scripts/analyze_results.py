@@ -124,6 +124,14 @@ def exclude_warmup(
     return evaluated_rows, excluded_count
 
 
+def detect_stats_reset(rows: list[MetricRow]) -> bool:
+    """Detect a decrease in cumulative request counts."""
+    return any(
+        current.requests < previous.requests
+        for previous, current in zip(rows, rows[1:])
+    )
+
+
 def summarize(rows: list[MetricRow]) -> dict[str, Any]:
     latest = rows[-1]
     return {
@@ -271,12 +279,28 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{evaluation['baseline_excluded_rows']}"
         )
 
+
+    lines.append(
+        "- Current stats reset detected: "
+        f"{evaluation['stats_reset_detected']}"
+    )
+
+    if evaluation["baseline_stats_reset_detected"] is not None:
+        lines.append(
+            "- Baseline stats reset detected: "
+            f"{evaluation['baseline_stats_reset_detected']}"
+        )
+
     lines.extend(
         [
-            "- Limitation: Locust percentile and request counters "
-            "remain cumulative.",
+            f"- Note: {evaluation['note']}",
             "",
             "## Deterministic evidence",
+        ]
+    )
+
+    lines.extend(
+        [
             "",
             f"- Samples: {report['summary']['samples']}",
             f"- Peak users: {peak['users']:.0f}",
@@ -331,19 +355,72 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def compare_manifests(current_path: Path, baseline_path: Path) -> dict[str, Any]:
-    current = json.loads(current_path.read_text(encoding="utf-8"))
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    fields = ("tool", "target", "workload_signature")
-    mismatches = [field for field in fields if current.get(field) != baseline.get(field)]
+def compare_manifests(
+    current_path: Path,
+    baseline_path: Path,
+) -> dict[str, Any]:
+    current = json.loads(
+        current_path.read_text(encoding="utf-8")
+    )
+    baseline = json.loads(
+        baseline_path.read_text(encoding="utf-8")
+    )
+
+    comparisons = {
+        "tool": (
+            current.get("tool"),
+            baseline.get("tool"),
+        ),
+        "target": (
+            current.get("target"),
+            baseline.get("target"),
+        ),
+        "workload_signature": (
+            current.get("workload_signature"),
+            baseline.get("workload_signature"),
+        ),
+        "evaluation.warmup_seconds": (
+            current.get("evaluation", {}).get(
+                "warmup_seconds"
+            ),
+            baseline.get("evaluation", {}).get(
+                "warmup_seconds"
+            ),
+        ),
+        "evaluation.stats_reset_mode": (
+            current.get("evaluation", {}).get(
+                "stats_reset_mode"
+            ),
+            baseline.get("evaluation", {}).get(
+                "stats_reset_mode"
+            ),
+        ),
+    }
+
+    mismatches = [
+        field
+        for field, values in comparisons.items()
+        if values[0] != values[1]
+    ]
+
     if mismatches:
         return {
             "status": "NOT_COMPARABLE",
-            "message": f"Manifest mismatch: {', '.join(mismatches)}",
+            "message": (
+                "Manifest mismatch: "
+                + ", ".join(mismatches)
+            ),
             "mismatches": mismatches,
         }
-    return {"status": "COMPARABLE", "message": "Tool, target, and workload signature match.", "mismatches": []}
 
+    return {
+        "status": "COMPARABLE",
+        "message": (
+            "Tool, target, workload signature, warm-up "
+            "duration, and statistics reset mode match."
+        ),
+        "mismatches": [],
+    }
 
 def build_report(
     result_path: Path,
@@ -358,6 +435,7 @@ def build_report(
     )
 
     result_rows = load_rows(result_path)
+    stats_reset_detected = detect_stats_reset(result_rows)
     evaluated_rows, excluded_rows = exclude_warmup(
         result_rows,
         warmup_seconds,
@@ -367,6 +445,7 @@ def build_report(
 
     baseline_summary = None
     baseline_excluded_rows = None
+    baseline_stats_reset_detected = None
     comparability = None
 
 
@@ -376,6 +455,9 @@ def build_report(
         comparability = compare_manifests(manifest_path, baseline_manifest_path)
     if baseline_path:
         baseline_rows = load_rows(baseline_path)
+        baseline_stats_reset_detected = detect_stats_reset(
+            baseline_rows
+        )
         evaluated_baseline_rows, baseline_excluded_rows = exclude_warmup(
             baseline_rows,
             warmup_seconds,
@@ -386,6 +468,25 @@ def build_report(
             findings.extend(compare_baseline(summary, baseline_summary, policy["regression_fail"]))
     has_failures = any(item["status"] == "FAIL" for item in findings)
     has_warnings = any(item["status"] == "WARN" for item in findings)
+    resets_confirmed = (
+        stats_reset_detected
+        and (
+            baseline_path is None
+            or baseline_stats_reset_detected is True
+        )
+    )
+
+    if resets_confirmed:
+        evaluation_note = (
+            "A decrease in cumulative request counts confirms "
+            "that Locust statistics were reset after warm-up."
+        )
+    else:
+        evaluation_note = (
+            "No statistics reset was detected. Locust "
+            "percentile and request counters may include "
+            "warm-up requests."
+        )
     return {
         "source": str(result_path),
         "baseline_source": str(baseline_path) if baseline_path else None,
@@ -397,10 +498,11 @@ def build_report(
             "warmup_seconds": warmup_seconds,
             "excluded_rows": excluded_rows,
             "baseline_excluded_rows": baseline_excluded_rows,
-            "note": (
-                "Rows within the warm-up period are excluded. "
-                "Locust percentile and request counters remain cumulative."
+            "stats_reset_detected": stats_reset_detected,
+            "baseline_stats_reset_detected": (
+                baseline_stats_reset_detected
             ),
+            "note": evaluation_note,
         },
         "findings": findings,
         "comparability": comparability,

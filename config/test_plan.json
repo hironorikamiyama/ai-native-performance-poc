@@ -1,6 +1,7 @@
 {
-  "plan_id": "ai-native-performance-poc-v2",
+  "plan_id": "ai-native-performance-poc-v3",
   "assumption_status": "provisional",
+  "evaluation_policy_file": "config/thresholds.json",
   "tool": {
     "name": "Locust",
     "version": "2.40.4",

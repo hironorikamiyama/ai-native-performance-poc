@@ -2,9 +2,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-
-import sys
-from pathlib import Path
+from dataclasses import replace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,3 +179,68 @@ def test_rps_decrease_detects_regression() -> None:
     assert rps_finding["current"] == 75.0
     assert rps_finding["decrease_percent"] == 25.0
     assert rps_finding["status"] == "FAIL"
+
+
+def test_detect_stats_reset_from_request_count_drop() -> None:
+    rows = MODULE.load_rows(ROOT / "data" / "baseline.csv")
+
+    reset_rows = [
+        rows[0],
+        replace(rows[1], requests=10.0),
+        rows[2],
+    ]
+
+    assert MODULE.detect_stats_reset(reset_rows) is True
+    assert MODULE.detect_stats_reset(rows) is False
+
+
+def test_manifest_warmup_mismatch_is_not_comparable(
+    tmp_path: Path,
+) -> None:
+    current = {
+        "tool": {
+            "name": "Locust",
+            "version": "2.40.4",
+        },
+        "target": {
+            "environment": "test",
+            "dataset_id": "v1",
+        },
+        "workload_signature": {
+            "users": 50,
+        },
+        "evaluation": {
+            "warmup_seconds": 10.0,
+            "stats_reset_mode": "locust_reset_all",
+        },
+    }
+    baseline = {
+        **current,
+        "evaluation": {
+            "warmup_seconds": 20.0,
+            "stats_reset_mode": "locust_reset_all",
+        },
+    }
+
+    current_path = tmp_path / "current-manifest.json"
+    baseline_path = tmp_path / "baseline-manifest.json"
+
+    current_path.write_text(
+        json.dumps(current),
+        encoding="utf-8",
+    )
+    baseline_path.write_text(
+        json.dumps(baseline),
+        encoding="utf-8",
+    )
+
+    result = MODULE.compare_manifests(
+        current_path,
+        baseline_path,
+    )
+
+    assert result["status"] == "NOT_COMPARABLE"
+    assert (
+        "evaluation.warmup_seconds"
+        in result["mismatches"]
+    )
