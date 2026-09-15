@@ -139,3 +139,45 @@ def test_error_rate_uses_final_cumulative_value() -> None:
 
     assert error_finding["actual"] == 0.5
     assert error_finding["status"] == "PASS"
+
+
+def test_rps_decrease_detects_regression() -> None:
+    policy = json.loads(
+        (ROOT / "config" / "thresholds.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    baseline = {
+        "peak": {
+            "p95_ms": 100.0,
+            "p99_ms": 200.0,
+        },
+        "median": {
+            "rps": 100.0,
+        },
+    }
+    current = {
+        "peak": {
+            "p95_ms": 100.0,
+            "p99_ms": 200.0,
+        },
+        "median": {
+            "rps": 75.0,
+        },
+    }
+
+    findings = MODULE.compare_baseline(
+        current,
+        baseline,
+        policy["regression_fail"],
+    )
+    rps_finding = next(
+        finding
+        for finding in findings
+        if finding["metric"] == "median_rps"
+    )
+
+    assert rps_finding["baseline"] == 100.0
+    assert rps_finding["current"] == 75.0
+    assert rps_finding["decrease_percent"] == 25.0
+    assert rps_finding["status"] == "FAIL"

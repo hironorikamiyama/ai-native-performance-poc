@@ -187,18 +187,28 @@ def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, 
                 "status": breach_status if actual > limit else "PASS",
             }
         )
+
+
     return findings
 
 
 def compare_baseline(
-    current: dict[str, Any], baseline: dict[str, Any], regression_policy: dict[str, float]
+    current: dict[str, Any],
+    baseline: dict[str, Any],
+    regression_policy: dict[str, float],
 ) -> list[dict[str, Any]]:
     findings = []
+
     for metric in ("p95_ms", "p99_ms"):
         before = baseline["peak"][metric]
         after = current["peak"][metric]
-        change = ((after - before) / before * 100) if before else 0.0
+        change = (
+            (after - before) / before * 100
+            if before
+            else 0.0
+        )
         limit = regression_policy[f"{metric}_percent_max"]
+
         findings.append(
             {
                 "kind": "regression",
@@ -211,6 +221,33 @@ def compare_baseline(
                 "status": "FAIL" if change > limit else "PASS",
             }
         )
+
+    baseline_rps = baseline["median"]["rps"]
+    current_rps = current["median"]["rps"]
+    decrease_percent = (
+        (baseline_rps - current_rps) / baseline_rps * 100
+        if baseline_rps
+        else 0.0
+    )
+    rps_limit = regression_policy["rps_decrease_percent_max"]
+
+    findings.append(
+        {
+            "kind": "regression",
+            "category": "service",
+            "metric": "median_rps",
+            "baseline": baseline_rps,
+            "current": current_rps,
+            "decrease_percent": round(decrease_percent, 2),
+            "limit_percent": rps_limit,
+            "status": (
+                "FAIL"
+                if decrease_percent > rps_limit
+                else "PASS"
+            ),
+        }
+    )
+
     return findings
 
 
@@ -249,6 +286,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{report['summary']['latest']['error_rate_percent']:.3f}%",
             f"- Peak observed error rate: {peak['error_rate_percent']:.3f}%",
             f"- Peak throughput: {peak['rps']:.2f} requests/s",
+            "- Median throughput: "
+            f"{report['summary']['median']['rps']:.2f} requests/s",
         ]
     )
     lines.append("- CPU: not supplied" if peak["cpu_percent"] is None else f"- Peak CPU: {peak['cpu_percent']:.2f}%")
@@ -256,11 +295,24 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Checks", ""])
     for item in report["findings"]:
         if item["kind"] == "threshold":
-            lines.append(f"- {item['status']}: {item['metric']}={item['actual']} (limit {item['limit']})")
+            lines.append(
+                f"- {item['status']}: "
+                f"{item['metric']}={item['actual']} "
+                f"(limit {item['limit']})"
+            )
+        elif item["metric"] == "median_rps":
+            lines.append(
+                f"- {item['status']}: median_rps decreased "
+                f"{item['decrease_percent']}% "
+                f"({item['baseline']} -> {item['current']}; "
+                f"limit {item['limit_percent']}%)"
+            )
         else:
             lines.append(
-                f"- {item['status']}: {item['metric']} changed {item['change_percent']}% "
-                f"({item['baseline']} -> {item['current']}; limit {item['limit_percent']}%)"
+                f"- {item['status']}: {item['metric']} changed "
+                f"{item['change_percent']}% "
+                f"({item['baseline']} -> {item['current']}; "
+                f"limit {item['limit_percent']}%)"
             )
     if report["comparability"]:
         lines.extend(["", "## Baseline comparability", ""])

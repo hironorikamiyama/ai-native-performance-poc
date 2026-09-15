@@ -1,5 +1,5 @@
 {
-  "policy_id": "poc-provisional-v3",
+  "policy_id": "poc-provisional-v4",
   "assumption_status": "provisional",
   "evaluation": {
     "warmup_seconds": 10
@@ -15,6 +15,7 @@
   },
   "regression_fail": {
     "p95_ms_percent_max": 20.0,
-    "p99_ms_percent_max": 20.0
+    "p99_ms_percent_max": 20.0,
+    "rps_decrease_percent_max": 20.0
   }
 }
