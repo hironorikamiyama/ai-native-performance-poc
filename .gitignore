@@ -5,3 +5,4 @@ results/live/
 # Locally generated performance analysis reports
 results/locust-analysis*.json
 results/locust-analysis*.md
+results/runs/
