@@ -1,5 +1,5 @@
 {
-  "policy_id": "poc-provisional-v4",
+  "policy_id": "poc-fixed-v1",
   "assumption_status": "provisional",
   "evaluation": {
     "warmup_seconds": 10
