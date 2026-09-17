@@ -324,63 +324,62 @@ def compare_baseline(
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    peak = report["summary"]["peak"]
-    evaluation = report["evaluation"]
     lines = [
         "# Performance Test Analysis",
         "",
-        f"**Service verdict: {report['verdict']}**",
+        f"- Report schema version: {report['report_schema_version']}",
+        f"- Service verdict: **{report['verdict']}**",
         "",
         "## Evaluation window",
         "",
-        f"- Warm-up seconds: {evaluation['warmup_seconds']:.0f}",
-        f"- Current rows excluded: {evaluation['excluded_rows']}",
+        f"- Warm-up seconds: {report['evaluation']['warmup_seconds']}",
+        f"- Current rows excluded: {report['evaluation']['excluded_rows']}",
+        f"- Baseline rows excluded: "
+        f"{report['evaluation'].get('baseline_excluded_rows')}",
+        f"- Current stats reset detected: "
+        f"{report['evaluation']['stats_reset_detected']}",
+        f"- Baseline stats reset detected: "
+        f"{report['evaluation'].get('baseline_stats_reset_detected')}",
+        f"- Note: {report['evaluation']['note']}",
+        "",
+        "## Deterministic evidence",
+        "",
+        f"- Samples: {report['summary']['samples']}",
+        f"- Peak users: {report['summary']['peak']['users']:.0f}",
+        f"- Peak p95: {report['summary']['peak']['p95_ms']:.2f} ms",
+        f"- Peak p99: {report['summary']['peak']['p99_ms']:.2f} ms",
+        f"- Final cumulative error rate: "
+        f"{report['summary']['latest']['error_rate_percent']:.3f}%",
+        f"- Peak observed error rate: "
+        f"{report['summary']['peak']['error_rate_percent']:.3f}%",
+        f"- Peak throughput: "
+        f"{report['summary']['peak']['rps']:.2f} requests/s",
+        f"- Median throughput: "
+        f"{report['summary']['median']['rps']:.2f} requests/s",
     ]
 
-    if evaluation["baseline_excluded_rows"] is not None:
-        lines.append(
-            "- Baseline rows excluded: "
-            f"{evaluation['baseline_excluded_rows']}"
-        )
-
+    cpu = report["summary"]["peak"]["cpu_percent"]
+    memory = report["summary"]["peak"]["memory_percent"]
 
     lines.append(
-        "- Current stats reset detected: "
-        f"{evaluation['stats_reset_detected']}"
+        f"- CPU: {cpu:.2f}%"
+        if cpu is not None
+        else "- CPU: not supplied"
     )
-
-    if evaluation["baseline_stats_reset_detected"] is not None:
-        lines.append(
-            "- Baseline stats reset detected: "
-            f"{evaluation['baseline_stats_reset_detected']}"
-        )
-
-    lines.extend(
-        [
-            f"- Note: {evaluation['note']}",
-            "",
-            "## Deterministic evidence",
-        ]
+    lines.append(
+        f"- Memory: {memory:.2f}%"
+        if memory is not None
+        else "- Memory: not supplied"
     )
 
     lines.extend(
         [
             "",
-            f"- Samples: {report['summary']['samples']}",
-            f"- Peak users: {peak['users']:.0f}",
-            f"- Peak p95: {peak['p95_ms']:.2f} ms",
-            f"- Peak p99: {peak['p99_ms']:.2f} ms",
-            "- Final cumulative error rate: "
-            f"{report['summary']['latest']['error_rate_percent']:.3f}%",
-            f"- Peak observed error rate: {peak['error_rate_percent']:.3f}%",
-            f"- Peak throughput: {peak['rps']:.2f} requests/s",
-            "- Median throughput: "
-            f"{report['summary']['median']['rps']:.2f} requests/s",
+            "## Checks",
+            "",
         ]
     )
-    lines.append("- CPU: not supplied" if peak["cpu_percent"] is None else f"- Peak CPU: {peak['cpu_percent']:.2f}%")
-    lines.append("- Memory: not supplied" if peak["memory_percent"] is None else f"- Peak memory: {peak['memory_percent']:.2f}%")
-    lines.extend(["", "## Checks", ""])
+
     for item in report["findings"]:
         if item["kind"] == "threshold":
             lines.append(
@@ -388,6 +387,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"{item['metric']}={item['actual']} "
                 f"(limit {item['limit']})"
             )
+
         elif item["status"] == "NOT_EVALUATED":
             lines.append(
                 f"- NOT_EVALUATED: {item['metric']} "
@@ -409,20 +409,51 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"({item['baseline']} -> {item['current']}; "
                 f"limit {item['limit_percent']}%)"
             )
+
     if report["comparability"]:
-        lines.extend(["", "## Baseline comparability", ""])
-        lines.append(f"- {report['comparability']['status']}: {report['comparability']['message']}")
+        lines.extend(
+            [
+                "",
+                "## Baseline comparability",
+                "",
+            ]
+        )
+
+        lines.append(
+            f"- {report['comparability']['status']}: "
+            f"{report['comparability']['message']}"
+        )
+
+        mismatches = report["comparability"].get("mismatches", [])
+        for mismatch in mismatches:
+            lines.append(f"- Mismatch: {mismatch}")
+
+    lines.extend(
+        [
+            "",
+            "## Limitations",
+            "",
+        ]
+    )
+
+    for limitation in report["limitations"]:
+        lines.append(f"- {limitation}")
+
     lines.extend(
         [
             "",
             "## AI review instructions",
             "",
-            "Using only the evidence above, explain observed trends and risks. Treat causes as hypotheses, "
-            "state what additional application/DB/infrastructure evidence would confirm them, and require "
-            "human review before a release decision.",
-            "",
+            (
+                "Using only the evidence above, explain observed trends "
+                "and risks. Treat causes as hypotheses, state what "
+                "additional application/DB/infrastructure evidence would "
+                "confirm them, and require human review before a release "
+                "decision."
+            ),
         ]
     )
+
     return "\n".join(lines)
 
 
@@ -559,6 +590,7 @@ def build_report(
             "warm-up requests."
         )
     return {
+        "report_schema_version": "1.0",
         "source": str(result_path),
         "baseline_source": str(baseline_path) if baseline_path else None,
         "verdict": "FAIL" if has_failures else ("PASS_WITH_WARNINGS" if has_warnings else "PASS"),
