@@ -155,6 +155,16 @@ def summarize(rows: list[MetricRow]) -> dict[str, Any]:
     }
 
 
+# PoC verdict policy:
+# - Absolute service thresholds use peak p95, peak p99,
+#   and final cumulative error rate.
+# - Resource metrics are WARN only.
+# - Regression thresholds use peak p95/p99 degradation
+#   and median RPS decrease versus baseline.
+# - Any FAIL => FAIL.
+# - WARN without FAIL => PASS_WITH_WARNINGS.
+# - Otherwise => PASS.
+# - AI does not participate in deterministic PASS/FAIL judgement.
 def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
     checks = [
         ("service", "p95_ms", summary["peak"]["p95_ms"], policy["service_fail"].get("p95_ms_max"), "FAIL"),
@@ -200,22 +210,56 @@ def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, 
     return findings
 
 
+def calculate_change_percent(
+    before: float,
+    after: float,
+) -> float | None:
+    """Calculate percentage change.
+
+    A zero baseline cannot produce a meaningful relative change,
+    so return None instead of treating it as 0%.
+    """
+    if before == 0:
+        return None
+
+    return (after - before) / before * 100
+
+
 def compare_baseline(
     current: dict[str, Any],
     baseline: dict[str, Any],
     regression_policy: dict[str, float],
 ) -> list[dict[str, Any]]:
-    findings = []
+    """Compare current performance against baseline deterministically."""
 
+    findings: list[dict[str, Any]] = []
+
+    # Latency regression
     for metric in ("p95_ms", "p99_ms"):
         before = baseline["peak"][metric]
         after = current["peak"][metric]
-        change = (
-            (after - before) / before * 100
-            if before
-            else 0.0
-        )
         limit = regression_policy[f"{metric}_percent_max"]
+
+        change = calculate_change_percent(before, after)
+
+        if change is None:
+            findings.append(
+                {
+                    "kind": "regression",
+                    "category": "service",
+                    "metric": metric,
+                    "baseline": before,
+                    "current": after,
+                    "change_percent": None,
+                    "limit_percent": limit,
+                    "status": "NOT_EVALUATED",
+                    "reason": (
+                        "Baseline value is zero, so relative "
+                        "percentage change cannot be calculated."
+                    ),
+                }
+            )
+            continue
 
         findings.append(
             {
@@ -230,31 +274,51 @@ def compare_baseline(
             }
         )
 
+    # Throughput regression
     baseline_rps = baseline["median"]["rps"]
     current_rps = current["median"]["rps"]
-    decrease_percent = (
-        (baseline_rps - current_rps) / baseline_rps * 100
-        if baseline_rps
-        else 0.0
-    )
     rps_limit = regression_policy["rps_decrease_percent_max"]
 
-    findings.append(
-        {
-            "kind": "regression",
-            "category": "service",
-            "metric": "median_rps",
-            "baseline": baseline_rps,
-            "current": current_rps,
-            "decrease_percent": round(decrease_percent, 2),
-            "limit_percent": rps_limit,
-            "status": (
-                "FAIL"
-                if decrease_percent > rps_limit
-                else "PASS"
-            ),
-        }
-    )
+    if baseline_rps == 0:
+        findings.append(
+            {
+                "kind": "regression",
+                "category": "service",
+                "metric": "median_rps",
+                "baseline": baseline_rps,
+                "current": current_rps,
+                "decrease_percent": None,
+                "limit_percent": rps_limit,
+                "status": "NOT_EVALUATED",
+                "reason": (
+                    "Baseline median RPS is zero, so relative "
+                    "throughput decrease cannot be calculated."
+                ),
+            }
+        )
+    else:
+        decrease_percent = (
+            (baseline_rps - current_rps)
+            / baseline_rps
+            * 100
+        )
+
+        findings.append(
+            {
+                "kind": "regression",
+                "category": "service",
+                "metric": "median_rps",
+                "baseline": baseline_rps,
+                "current": current_rps,
+                "decrease_percent": round(decrease_percent, 2),
+                "limit_percent": rps_limit,
+                "status": (
+                    "FAIL"
+                    if decrease_percent > rps_limit
+                    else "PASS"
+                ),
+            }
+        )
 
     return findings
 
@@ -324,6 +388,12 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"{item['metric']}={item['actual']} "
                 f"(limit {item['limit']})"
             )
+        elif item["status"] == "NOT_EVALUATED":
+            lines.append(
+                f"- NOT_EVALUATED: {item['metric']} "
+                f"({item.get('reason', 'Comparison unavailable')})"
+            )
+
         elif item["metric"] == "median_rps":
             lines.append(
                 f"- {item['status']}: median_rps decreased "
@@ -331,6 +401,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"({item['baseline']} -> {item['current']}; "
                 f"limit {item['limit_percent']}%)"
             )
+
         else:
             lines.append(
                 f"- {item['status']}: {item['metric']} changed "
