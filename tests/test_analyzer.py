@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from dataclasses import replace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "performance-test-analysis" / "scripts" / "analyze_results.py"
@@ -12,6 +14,47 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.mark.parametrize(
+    ("failures", "expected_status"),
+    [(9996, "PASS"), (10000, "PASS"), (10004, "FAIL")],
+)
+def test_error_rate_boundary_uses_raw_value_in_report(
+    tmp_path: Path, failures: int, expected_status: str,
+) -> None:
+    policy = json.loads((ROOT / "config" / "thresholds.json").read_text())
+    policy["evaluation"]["warmup_seconds"] = 0
+    policy_path = tmp_path / "thresholds.json"
+    policy_path.write_text(json.dumps(policy))
+    history_path = tmp_path / "history.csv"
+    history_path.write_text(
+        "timestamp,users,requests,failures,avg_ms,p95_ms,p99_ms,rps\n"
+        f"0,50,1000000,{failures},20,100,150,100\n"
+    )
+    endpoint_path = tmp_path / "stats.csv"
+    endpoint_path.write_text(
+        "Type,Name,Request Count,Failure Count,95%,99%,Requests/s\n"
+        f"GET,/items,1000000,{failures},100,150,100\n"
+    )
+    report = MODULE.build_report(
+        history_path, policy_path, endpoint_path=endpoint_path,
+    )
+    assert report["verdict"] == expected_status
+    assert report["summary"]["latest"]["error_rate_percent"] == 1.0
+    endpoint = report["endpoints"]["GET /items"]
+    assert endpoint["error_rate_percent"] == 1.0
+    for findings in (report["findings"], endpoint["findings"]):
+        error_finding = next(
+            item for item in findings if item["metric"] == "error_rate_percent"
+        )
+        assert error_finding["status"] == expected_status
+        assert error_finding["actual"] == 1.0
+    serialized = json.loads(json.dumps(report))
+    assert serialized["verdict"] == expected_status
+    markdown = MODULE.render_markdown(report)
+    assert "Final cumulative error rate: 1.000%" in markdown
+    assert f"{expected_status}: error_rate_percent=1.0 (limit 1.0)" in markdown
 
 
 def test_degraded_run_fails_and_detects_regression() -> None:

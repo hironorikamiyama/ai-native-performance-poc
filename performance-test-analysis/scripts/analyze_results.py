@@ -313,7 +313,7 @@ def summarize(rows: list[MetricRow]) -> dict[str, Any]:
     latest = rows[-1]
     return {
         "samples": len(rows),
-        "latest": {**asdict(latest), "error_rate_percent": round(latest.error_rate_percent, 3)},
+        "latest": {**asdict(latest), "error_rate_percent": latest.error_rate_percent},
         "peak": {
             "users": max(row.users for row in rows),
             "avg_ms": max(row.avg_ms for row in rows),
@@ -377,7 +377,7 @@ def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, 
                 "kind": "threshold",
                 "category": category,
                 "metric": metric,
-                "actual": actual,
+                "actual": round(actual, 3) if metric == "error_rate_percent" else actual,
                 "limit": limit,
                 "status": breach_status if actual > limit else "PASS",
             }
@@ -531,10 +531,7 @@ def evaluate_endpoint(
     actuals = {
         "p95_ms": endpoint.p95_ms,
         "p99_ms": endpoint.p99_ms,
-        "error_rate_percent": round(
-            endpoint.error_rate_percent,
-            3,
-        ),
+        "error_rate_percent": endpoint.error_rate_percent,
     }
 
     findings: list[dict[str, Any]] = []
@@ -551,7 +548,7 @@ def evaluate_endpoint(
                 "category": "service",
                 "endpoint": endpoint.key,
                 "metric": metric,
-                "actual": actual,
+                "actual": round(actual, 3) if metric == "error_rate_percent" else actual,
                 "limit": limit,
                 "status": (
                     "FAIL"
@@ -986,6 +983,13 @@ def build_report(
             "percentile and request counters may include "
             "warm-up requests."
         )
+    # Round only for output, after all verdict checks have used raw values.
+    for output_summary in (summary, baseline_summary):
+        if output_summary is not None:
+            output_summary["latest"]["error_rate_percent"] = round(
+                output_summary["latest"]["error_rate_percent"], 3
+            )
+
     return {
         "report_schema_version": "1.1",
         "source": str(result_path),
