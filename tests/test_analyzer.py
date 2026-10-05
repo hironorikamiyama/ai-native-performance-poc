@@ -244,3 +244,313 @@ def test_manifest_warmup_mismatch_is_not_comparable(
         "evaluation.warmup_seconds"
         in result["mismatches"]
     )
+
+def test_load_endpoint_rows() -> None:
+    rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats.csv"
+    )
+
+    assert len(rows) == 2
+
+    items = next(
+        row
+        for row in rows
+        if row.key == "GET /items"
+    )
+
+    assert items.requests == 3543
+    assert items.failures == 95
+    assert items.p95_ms == 360
+    assert items.p99_ms == 360
+
+
+def test_endpoint_threshold_detects_items_failure() -> None:
+    policy = json.loads(
+        (
+            ROOT
+            / "config"
+            / "thresholds.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats.csv"
+    )
+
+    items = next(
+        row
+        for row in rows
+        if row.key == "GET /items"
+    )
+
+    findings = MODULE.evaluate_endpoint(
+        items,
+        policy,
+    )
+
+    failed = {
+        finding["metric"]
+        for finding in findings
+        if finding["status"] == "FAIL"
+    }
+
+    assert "p95_ms" in failed
+    assert "error_rate_percent" in failed
+    assert "p99_ms" not in failed
+
+
+def test_endpoint_baseline_detects_items_regression() -> None:
+    policy = json.loads(
+        (
+            ROOT
+            / "config"
+            / "thresholds.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    current_rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats.csv"
+    )
+
+    baseline_rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "baseline-reset-v1"
+        / "locust_stats.csv"
+    )
+
+    current = next(
+        row
+        for row in current_rows
+        if row.key == "GET /items"
+    )
+
+    baseline = next(
+        row
+        for row in baseline_rows
+        if row.key == "GET /items"
+    )
+
+    findings = MODULE.compare_endpoint_baseline(
+        current,
+        baseline,
+        policy["regression_fail"],
+    )
+
+    failed = {
+        finding["metric"]
+        for finding in findings
+        if finding["status"] == "FAIL"
+    }
+
+    assert {
+        "p95_ms",
+        "p99_ms",
+    } <= failed
+
+    rps_finding = next(
+        finding
+        for finding in findings
+        if finding["metric"] == "rps"
+    )
+
+    assert rps_finding["status"] == "INFO"
+    assert rps_finding["decrease_percent"] == 48.21
+    assert rps_finding["reference_exceeded"] is True
+
+
+def test_build_report_includes_endpoint_analysis() -> None:
+    report = MODULE.build_report(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats_history.csv",
+        ROOT
+        / "config"
+        / "thresholds.json",
+        ROOT
+        / "results"
+        / "runs"
+        / "baseline-reset-v1"
+        / "locust_stats_history.csv",
+        endpoint_path=(
+            ROOT
+            / "results"
+            / "runs"
+            / "regression-reset-v2"
+            / "locust_stats.csv"
+        ),
+        baseline_endpoint_path=(
+            ROOT
+            / "results"
+            / "runs"
+            / "baseline-reset-v1"
+            / "locust_stats.csv"
+        ),
+    )
+
+    assert report["report_schema_version"] == "1.1"
+    assert "GET /health" in report["endpoints"]
+    assert "GET /items" in report["endpoints"]
+
+    items = report["endpoints"]["GET /items"]
+
+    assert items["p95_ms"] == 360
+    assert items["p99_ms"] == 360
+    assert report["verdict"] == "FAIL"
+
+
+def test_manifest_mismatch_suppresses_endpoint_regression(
+    tmp_path: Path,
+) -> None:
+    current_manifest = {
+        "tool": {
+            "name": "Locust",
+            "version": "2.40.4",
+        },
+        "target": {
+            "environment": "test",
+            "dataset_id": "v1",
+        },
+        "workload_signature": {
+            "users": 50,
+        },
+    }
+
+    baseline_manifest = {
+        **current_manifest,
+        "workload_signature": {
+            "users": 20,
+        },
+    }
+
+    current_manifest_path = tmp_path / "current.json"
+    baseline_manifest_path = tmp_path / "baseline.json"
+
+    current_manifest_path.write_text(
+        json.dumps(current_manifest),
+        encoding="utf-8",
+    )
+
+    baseline_manifest_path.write_text(
+        json.dumps(baseline_manifest),
+        encoding="utf-8",
+    )
+
+    report = MODULE.build_report(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats_history.csv",
+        ROOT
+        / "config"
+        / "thresholds.json",
+        baseline_path=(
+            ROOT
+            / "results"
+            / "runs"
+            / "baseline-reset-v1"
+            / "locust_stats_history.csv"
+        ),
+        manifest_path=current_manifest_path,
+        baseline_manifest_path=baseline_manifest_path,
+        endpoint_path=(
+            ROOT
+            / "results"
+            / "runs"
+            / "regression-reset-v2"
+            / "locust_stats.csv"
+        ),
+        baseline_endpoint_path=(
+            ROOT
+            / "results"
+            / "runs"
+            / "baseline-reset-v1"
+            / "locust_stats.csv"
+        ),
+    )
+
+    assert report["comparability"]["status"] == "NOT_COMPARABLE"
+
+    endpoint_findings = [
+        finding
+        for endpoint in report["endpoints"].values()
+        for finding in endpoint["findings"]
+    ]
+
+    assert not any(
+        finding["kind"] == "endpoint_regression"
+        for finding in endpoint_findings
+    )
+
+def test_endpoint_rps_does_not_cause_failure() -> None:
+    policy = json.loads(
+        (
+            ROOT
+            / "config"
+            / "thresholds.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    current_rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "regression-reset-v2"
+        / "locust_stats.csv"
+    )
+
+    baseline_rows = MODULE.load_endpoint_rows(
+        ROOT
+        / "results"
+        / "runs"
+        / "baseline-reset-v1"
+        / "locust_stats.csv"
+    )
+
+    current = next(
+        row
+        for row in current_rows
+        if row.key == "GET /health"
+    )
+
+    baseline = next(
+        row
+        for row in baseline_rows
+        if row.key == "GET /health"
+    )
+
+    findings = MODULE.compare_endpoint_baseline(
+        current,
+        baseline,
+        policy["regression_fail"],
+    )
+
+    rps_finding = next(
+        finding
+        for finding in findings
+        if finding["metric"] == "rps"
+    )
+
+    assert rps_finding["decrease_percent"] == 42.6
+    assert rps_finding["status"] == "INFO"
+
+    assert not any(
+        finding["status"] == "FAIL"
+        for finding in findings
+    )

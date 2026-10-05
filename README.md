@@ -851,3 +851,139 @@ Human Review
 **人間が性能問題を調査するために必要な情報を、より早く整理できる仕組み**
 
 を作ることです。
+
+## API別性能分析
+
+`locust_stats.csv` を利用して、API / エンドポイント単位の性能分析を行えます。
+
+API別分析では、以下を評価します。
+
+- p95レスポンスタイム
+- p99レスポンスタイム
+- エラー率
+- baselineと比較したp95の性能回帰
+- baselineと比較したp99の性能回帰
+- API別RPSの変化（参考情報）
+
+### API別RPSの扱い
+
+API単位のRPS低下は、PASS / FAILの判定には使用しません。
+
+あるAPIの処理が遅くなると、Locust全体のユーザー処理サイクルが遅くなり、
+別のAPIの実行回数まで減少する場合があります。
+
+そのため、
+
+- システム全体のRPS低下は性能回帰の判定対象
+- API別RPS低下は `INFO` として参考表示
+- API別のp95 / p99 / エラー率はPASS / FAIL判定対象
+
+としています。
+
+### 出力例
+
+```text
+GET /health
+
+PASS: p95
+PASS: p99
+PASS: error rate
+PASS: p95 baseline regression
+PASS: p99 baseline regression
+INFO: RPS decreased
+
+
+GET /items
+
+FAIL: p95 threshold
+PASS: p99 threshold
+FAIL: error rate
+FAIL: p95 baseline regression
+FAIL: p99 baseline regression
+INFO: RPS decreased
+```
+
+このように、システム全体がFAILだった場合でも、
+
+```text
+システム全体がFAIL
+    ↓
+どのAPIで性能劣化が発生しているか確認
+    ↓
+p95 / p99 / error rate / baselineとの差を確認
+```
+
+という形で、問題箇所をAPI単位まで絞り込めます。
+
+### 実行例
+
+```bash
+python performance-test-analysis/scripts/analyze_results.py \
+  results/runs/regression-reset-v2/locust_stats_history.csv \
+  --thresholds config/thresholds.json \
+  --baseline results/runs/baseline-reset-v1/locust_stats_history.csv \
+  --endpoint results/runs/regression-reset-v2/locust_stats.csv \
+  --baseline-endpoint results/runs/baseline-reset-v1/locust_stats.csv \
+  --output-json results/locust-analysis-endpoint-v1.json \
+  --output-md results/locust-analysis-endpoint-v1.md
+```
+
+### JSON / Markdown出力
+
+API別分析結果は、JSONとMarkdownの両方へ出力されます。
+
+例：
+
+```text
+GET /items
+
+p95: 360 ms
+p99: 360 ms
+error rate: 2.681%
+RPS: 72.25 requests/s
+```
+
+baselineと比較した性能回帰も出力します。
+
+```text
+p95: 28 ms → 360 ms
+p99: 33 ms → 360 ms
+RPS: 139.50 → 72.25
+```
+
+ただし、RPSの低下はAPI自身の性能劣化とは限らないため、
+API単位では参考情報として扱います。
+
+### レポートスキーマ
+
+API別分析の追加に伴い、レポートスキーマを以下へ更新しています。
+
+```text
+report_schema_version: 1.1
+```
+
+---
+
+## テスト
+
+現在のテスト結果：
+
+```text
+24 passed
+```
+
+主なテスト内容：
+
+- 通常時のPASS判定
+- レスポンスタイム劣化
+- エラー率増加
+- baseline比較
+- warm-up除外
+- Locust統計リセット検出
+- baselineが0の場合の `NOT_EVALUATED`
+- manifest不一致時の比較抑止
+- API別CSV読込
+- API別閾値判定
+- API別baseline比較
+- API別RPSを `INFO` として扱うこと
+- manifest不一致時にAPI別回帰判定を行わないこと
