@@ -73,13 +73,7 @@ def make_summary(
 
 
 def make_verdict(findings: list[dict]) -> str:
-    if any(item["status"] == "FAIL" for item in findings):
-        return "FAIL"
-
-    if any(item["status"] == "WARN" for item in findings):
-        return "PASS_WITH_WARNINGS"
-
-    return "PASS"
+    return analyzer.determine_verdict(findings)
 
 
 def test_normal_scenario_is_pass() -> None:

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-from html import parser
 import json
+import math
 import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -28,8 +28,8 @@ class MetricRow:
     memory_percent: float | None = None
 
     @property
-    def error_rate_percent(self) -> float:
-        return (self.failures / self.requests * 100) if self.requests else 0.0
+    def error_rate_percent(self) -> float | None:
+        return error_rate(self.requests, self.failures)
 
 
 @dataclass(frozen=True)
@@ -47,12 +47,8 @@ class EndpointMetric:
         return f"{self.request_type} {self.name}"
 
     @property
-    def error_rate_percent(self) -> float:
-        return (
-            self.failures / self.requests * 100
-            if self.requests
-            else 0.0
-        )
+    def error_rate_percent(self) -> float | None:
+        return error_rate(self.requests, self.failures)
 
 ALIASES = {
     "timestamp": ("timestamp", "Timestamp"),
@@ -113,117 +109,24 @@ def load_rows(path: Path) -> list[MetricRow]:
 
 
 def compare_endpoint_baseline(
-    current: EndpointMetric,
-    baseline: EndpointMetric,
+    current: EndpointMetric, baseline: EndpointMetric,
     regression_policy: dict[str, float],
 ) -> list[dict[str, Any]]:
-    """Compare one endpoint against its baseline."""
-
-    findings: list[dict[str, Any]] = []
-
-    for metric in ("p95_ms", "p99_ms"):
-        before = getattr(baseline, metric)
-        after = getattr(current, metric)
-
-        limit = regression_policy[
-            f"{metric}_percent_max"
-        ]
-
-        change = calculate_change_percent(
-            before,
-            after,
-        )
-
-        if change is None:
-            findings.append(
-                {
-                    "kind": "endpoint_regression",
-                    "category": "service",
-                    "endpoint": current.key,
-                    "metric": metric,
-                    "baseline": before,
-                    "current": after,
-                    "change_percent": None,
-                    "limit_percent": limit,
-                    "status": "NOT_EVALUATED",
-                    "reason": (
-                        "Baseline value is zero, so relative "
-                        "percentage change cannot be calculated."
-                    ),
-                }
-            )
-            continue
-
-        findings.append(
-            {
-                "kind": "endpoint_regression",
-                "category": "service",
-                "endpoint": current.key,
-                "metric": metric,
-                "baseline": before,
-                "current": after,
-                "change_percent": round(change, 2),
-                "limit_percent": limit,
-                "status": (
-                    "FAIL"
-                    if change > limit
-                    else "PASS"
-                ),
-            }
-        )
-
-    baseline_rps = baseline.rps
-    current_rps = current.rps
-    reference_limit = regression_policy[
-        "rps_decrease_percent_max"
-    ]
-
-    if baseline_rps == 0:
-        findings.append(
-            {
-                "kind": "endpoint_observation",
-                "category": "service",
-                "endpoint": current.key,
-                "metric": "rps",
-                "baseline": baseline_rps,
-                "current": current_rps,
-                "decrease_percent": None,
-                "reference_limit_percent": reference_limit,
-                "status": "INFO",
-                "reason": (
-                    "Baseline endpoint RPS is zero, so relative "
-                    "throughput decrease cannot be calculated."
-                ),
-            }
-        )
-    else:
-        decrease = (
-            (baseline_rps - current_rps)
-            / baseline_rps
-            * 100
-        )
-
-        findings.append(
-            {
-                "kind": "endpoint_observation",
-                "category": "service",
-                "endpoint": current.key,
-                "metric": "rps",
-                "baseline": baseline_rps,
-                "current": current_rps,
-                "decrease_percent": round(decrease, 2),
-                "reference_limit_percent": reference_limit,
-                "reference_exceeded": decrease > reference_limit,
-                "status": "INFO",
-                "reason": (
-                    "Endpoint throughput is informational only. "
-                    "A decrease may result from changes in the "
-                    "overall workload cycle and does not by itself "
-                    "establish endpoint performance regression."
-                ),
-            }
-        )
-
+    findings = compare_baseline(
+        endpoint_summary(current), endpoint_summary(baseline), regression_policy,
+    )
+    for item in findings:
+        item["endpoint"] = current.key
+        if item["metric"] == "median_rps":
+            item["metric"] = "rps"
+            item["kind"] = "endpoint_observation"
+            item["reference_limit_percent"] = item.pop("limit_percent", regression_policy["rps_decrease_percent_max"])
+            if item["status"] != "INVALID_DATA":
+                item["reference_exceeded"] = item["status"] == "FAIL"
+                item["status"] = "INFO"
+                item.setdefault("reason", "Endpoint throughput is informational only.")
+        else:
+            item["kind"] = "endpoint_regression"
     return findings
 
 
@@ -279,13 +182,17 @@ def exclude_warmup(
     warmup_seconds: float,
 ) -> tuple[list[MetricRow], int]:
     """Exclude measurement rows within the warm-up period."""
-    if warmup_seconds < 0:
+    if not math.isfinite(warmup_seconds) or warmup_seconds < 0:
         raise ValueError("warmup_seconds must be zero or greater")
 
     if warmup_seconds == 0:
         return rows, 0
 
-    started_at = parse_timestamp(rows[0].timestamp)
+    timestamps = [parse_timestamp(row.timestamp) for row in rows]
+    if any(not math.isfinite(value) for value in timestamps):
+        # The evaluation window cannot be established safely; preserve evidence.
+        return rows, 0
+    started_at = timestamps[0]
     cutoff = started_at + warmup_seconds
     evaluated_rows = [
         row for row in rows
@@ -304,32 +211,136 @@ def exclude_warmup(
 def detect_stats_reset(rows: list[MetricRow]) -> bool:
     """Detect a decrease in cumulative request counts."""
     return any(
-        current.requests < previous.requests
+        math.isfinite(current.requests) and math.isfinite(previous.requests)
+        and current.requests >= 0 and previous.requests >= 0
+        and current.requests < previous.requests
         for previous, current in zip(rows, rows[1:])
     )
 
 
+def value_reason(metric, value):
+    if value is None:
+        return f"{metric} measurement is unavailable."
+    if not math.isfinite(value):
+        return f"{metric} is {value}; a finite measurement is required."
+    if metric in ("requests", "failures", "p95_ms", "p99_ms", "rps", "median_rps") and value < 0:
+        return f"{metric} is negative ({value})."
+    if metric == "requests" and value == 0:
+        return "requests is zero; no measured requests are available."
+    return None
+
+
+def count_reason(requests, failures):
+    return (value_reason("requests", requests)
+            or value_reason("failures", failures)
+            or ("failures exceeds requests." if failures > requests else None))
+
+
+def error_rate(requests, failures):
+    if count_reason(requests, failures):
+        return None
+    result = failures / requests * 100
+    return result if math.isfinite(result) else None
+
+
+def invalid_finding(metric, reason, **context):
+    category = "resource" if metric in ("cpu_percent", "memory_percent") else "service"
+    return {"kind": "data_quality", "category": category, "metric": metric,
+            "status": "INVALID_DATA", "reason": reason, **context}
+
+
+def row_quality(row, source="current", sample=None):
+    findings = []
+    context = {"source": source}
+    if sample is not None:
+        context.update(sample=sample, timestamp=row.timestamp)
+    counts = count_reason(row.requests, row.failures)
+    if isinstance(row, MetricRow):
+        timestamp = parse_timestamp(row.timestamp)
+        if not math.isfinite(timestamp):
+            findings.append(invalid_finding("timestamp", f"timestamp is {timestamp}; evaluation window is invalid.", **context))
+    for metric in asdict(row):
+        if metric in ("timestamp", "request_type", "name"):
+            continue
+        value = getattr(row, metric)
+        if value is None and metric in ("cpu_percent", "memory_percent"):
+            continue
+        reason = value_reason(metric, value)
+        if metric == "failures" and not reason and counts == "failures exceeds requests.":
+            reason = counts
+        if reason:
+            findings.append(invalid_finding(metric, reason, **context))
+    for metric in ("p95_ms", "p99_ms", "error_rate_percent"):
+        if counts:
+            findings.append(invalid_finding(metric, counts, **context))
+    return findings
+
+
 def summarize(rows: list[MetricRow]) -> dict[str, Any]:
-    latest = rows[-1]
-    return {
-        "samples": len(rows),
-        "latest": {**asdict(latest), "error_rate_percent": latest.error_rate_percent},
-        "peak": {
-            "users": max(row.users for row in rows),
-            "avg_ms": max(row.avg_ms for row in rows),
-            "p95_ms": max(row.p95_ms for row in rows),
-            "p99_ms": max(row.p99_ms for row in rows),
-            "error_rate_percent": round(max(row.error_rate_percent for row in rows), 3),
-            "rps": max(row.rps for row in rows),
-            "cpu_percent": max((row.cpu_percent for row in rows if row.cpu_percent is not None), default=None),
-            "memory_percent": max((row.memory_percent for row in rows if row.memory_percent is not None), default=None),
-        },
-        "median": {
-            "p95_ms": statistics.median(row.p95_ms for row in rows),
-            "p99_ms": statistics.median(row.p99_ms for row in rows),
-            "rps": statistics.median(row.rps for row in rows),
-        },
-    }
+    quality = [item for index, row in enumerate(rows, 1)
+               for item in row_quality(row, sample=index)]
+
+    def values(metric):
+        result = []
+        for row in rows:
+            value = getattr(row, metric)
+            if value is None or value_reason(metric, value):
+                continue
+            if metric in ("p95_ms", "p99_ms") and count_reason(row.requests, row.failures):
+                continue
+            result.append(value)
+        return result
+
+    peaks = {metric: max(values(metric), default=None) for metric in (
+        "users", "avg_ms", "p95_ms", "p99_ms", "error_rate_percent",
+        "rps", "cpu_percent", "memory_percent")}
+    if peaks["error_rate_percent"] is not None:
+        peaks["error_rate_percent"] = round(peaks["error_rate_percent"], 3)
+    medians = {}
+    for metric in ("p95_ms", "p99_ms", "rps"):
+        measured = values(metric)
+        # A partial median is not a valid baseline comparison input.
+        medians[metric] = statistics.median(measured) if len(measured) == len(rows) else None
+        if medians[metric] is not None and not math.isfinite(medians[metric]):
+            quality.append(invalid_finding(metric, "Calculated median is non-finite."))
+            medians[metric] = None
+    return {"samples": len(rows),
+            "latest": {**asdict(rows[-1]), "error_rate_percent": rows[-1].error_rate_percent},
+            "peak": peaks, "median": medians, "data_quality": quality}
+
+
+def endpoint_summary(endpoint):
+    counts = count_reason(endpoint.requests, endpoint.failures)
+    return {"latest": {"error_rate_percent": endpoint.error_rate_percent},
+            "peak": {"p95_ms": None if counts else endpoint.p95_ms,
+                     "p99_ms": None if counts else endpoint.p99_ms,
+                     "cpu_percent": None, "memory_percent": None},
+            "median": {"rps": endpoint.rps},
+            "data_quality": row_quality(endpoint)}
+
+
+def finite_output(value):
+    """Normalize non-finite measurements; strict serialization remains a final guard."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: finite_output(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [finite_output(item) for item in value]
+    return value
+
+
+def serialize_report(report):
+    return json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def determine_verdict(findings: list[dict[str, Any]]) -> str:
+    statuses = {item["status"] for item in findings}
+    for status, verdict in (("FAIL", "FAIL"), ("INVALID_DATA", "INVALID_DATA"),
+                            ("WARN", "PASS_WITH_WARNINGS")):
+        if status in statuses:
+            return verdict
+    return "PASS"
 
 
 # PoC verdict policy:
@@ -339,7 +350,8 @@ def summarize(rows: list[MetricRow]) -> dict[str, Any]:
 # - Regression thresholds use peak p95/p99 degradation
 #   and median RPS decrease versus baseline.
 # - Any FAIL => FAIL.
-# - WARN without FAIL => PASS_WITH_WARNINGS.
+# - INVALID_DATA without FAIL => INVALID_DATA.
+# - WARN without FAIL or INVALID_DATA => PASS_WITH_WARNINGS.
 # - Otherwise => PASS.
 # - AI does not participate in deterministic PASS/FAIL judgement.
 def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
@@ -368,9 +380,19 @@ def evaluate(summary: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, 
             "WARN",
         ),
     ]
-    findings = []
+    findings = list(summary.get("data_quality", []))
+    invalid_metrics = {item["metric"] for item in findings}
     for category, metric, actual, limit, breach_status in checks:
-        if actual is None or limit is None:
+        if limit is None:
+            continue
+        if actual is None and category == "resource":
+            continue
+        reason = value_reason(metric, actual)
+        if reason:
+            if metric not in invalid_metrics:
+                findings.append(invalid_finding(metric, reason))
+            continue
+        if metric in invalid_metrics and actual <= limit:
             continue
         findings.append(
             {
@@ -396,6 +418,9 @@ def calculate_change_percent(
     A zero baseline cannot produce a meaningful relative change,
     so return None instead of treating it as 0%.
     """
+    reason = value_reason("baseline", before) or value_reason("current", after)
+    if reason:
+        raise ValueError(reason)
     if before == 0:
         return None
 
@@ -417,7 +442,14 @@ def compare_baseline(
         after = current["peak"][metric]
         limit = regression_policy[f"{metric}_percent_max"]
 
+        reason = comparison_reason(current, baseline, metric, before, after)
+        if reason:
+            findings.append(invalid_finding(metric, reason, baseline=before, current=after))
+            continue
         change = calculate_change_percent(before, after)
+        if change is not None and not math.isfinite(change):
+            findings.append(invalid_finding(metric, "Calculated change is non-finite.", baseline=before, current=after))
+            continue
 
         if change is None:
             findings.append(
@@ -456,7 +488,10 @@ def compare_baseline(
     current_rps = current["median"]["rps"]
     rps_limit = regression_policy["rps_decrease_percent_max"]
 
-    if baseline_rps == 0:
+    reason = comparison_reason(current, baseline, "rps", baseline_rps, current_rps)
+    if reason:
+        findings.append(invalid_finding("median_rps", reason, baseline=baseline_rps, current=current_rps))
+    elif baseline_rps == 0:
         findings.append(
             {
                 "kind": "regression",
@@ -480,6 +515,9 @@ def compare_baseline(
             * 100
         )
 
+        if not math.isfinite(decrease_percent):
+            findings.append(invalid_finding("median_rps", "Calculated decrease is non-finite.", baseline=baseline_rps, current=current_rps))
+            return findings
         findings.append(
             {
                 "kind": "regression",
@@ -500,65 +538,30 @@ def compare_baseline(
     return findings
 
 
-def evaluate_endpoint(
-    endpoint: EndpointMetric,
-    policy: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Evaluate one endpoint against deterministic thresholds."""
+def comparison_reason(current, baseline, metric, before, after):
+    for source, summary, value in (("baseline", baseline, before), ("current", current, after)):
+        issues = [item["reason"] for item in summary.get("data_quality", []) if item["metric"] == metric]
+        reason = "; ".join(issues) or value_reason(metric, value)
+        if reason:
+            return f"{source}: {reason}"
+    return None
 
-    overrides = policy.get(
-        "endpoint_service_fail",
-        {},
-    ).get(endpoint.key, {})
 
-    defaults = policy["service_fail"]
-
-    thresholds = {
-        "p95_ms": overrides.get(
-            "p95_ms_max",
-            defaults.get("p95_ms_max"),
-        ),
-        "p99_ms": overrides.get(
-            "p99_ms_max",
-            defaults.get("p99_ms_max"),
-        ),
-        "error_rate_percent": overrides.get(
-            "error_rate_percent_max",
-            defaults.get("error_rate_percent_max"),
-        ),
-    }
-
-    actuals = {
-        "p95_ms": endpoint.p95_ms,
-        "p99_ms": endpoint.p99_ms,
-        "error_rate_percent": endpoint.error_rate_percent,
-    }
-
-    findings: list[dict[str, Any]] = []
-
-    for metric, actual in actuals.items():
-        limit = thresholds[metric]
-
-        if limit is None:
-            continue
-
-        findings.append(
-            {
-                "kind": "endpoint_threshold",
-                "category": "service",
-                "endpoint": endpoint.key,
-                "metric": metric,
-                "actual": round(actual, 3) if metric == "error_rate_percent" else actual,
-                "limit": limit,
-                "status": (
-                    "FAIL"
-                    if actual > limit
-                    else "PASS"
-                ),
-            }
-        )
-
+def evaluate_endpoint(endpoint: EndpointMetric, policy: dict[str, Any]) -> list[dict[str, Any]]:
+    overrides = policy.get("endpoint_service_fail", {}).get(endpoint.key, {})
+    endpoint_policy = {**policy, "service_fail": {**policy["service_fail"], **overrides}}
+    findings = evaluate(endpoint_summary(endpoint), endpoint_policy)
+    for item in findings:
+        item["endpoint"] = endpoint.key
+        if item["kind"] == "threshold":
+            item["kind"] = "endpoint_threshold"
     return findings
+
+
+def format_measurement(value, spec):
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "無効／算出不可"
+    return format(value, spec)
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -583,31 +586,31 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Deterministic evidence",
         "",
         f"- Samples: {report['summary']['samples']}",
-        f"- Peak users: {report['summary']['peak']['users']:.0f}",
-        f"- Peak p95: {report['summary']['peak']['p95_ms']:.2f} ms",
-        f"- Peak p99: {report['summary']['peak']['p99_ms']:.2f} ms",
+        f"- Peak users: {format_measurement(report['summary']['peak']['users'], '.0f')}",
+        f"- Peak p95: {format_measurement(report['summary']['peak']['p95_ms'], '.2f')} ms",
+        f"- Peak p99: {format_measurement(report['summary']['peak']['p99_ms'], '.2f')} ms",
         f"- Final cumulative error rate: "
-        f"{report['summary']['latest']['error_rate_percent']:.3f}%",
+        f"{format_measurement(report['summary']['latest']['error_rate_percent'], '.3f')}%",
         f"- Peak observed error rate: "
-        f"{report['summary']['peak']['error_rate_percent']:.3f}%",
+        f"{format_measurement(report['summary']['peak']['error_rate_percent'], '.3f')}%",
         f"- Peak throughput: "
-        f"{report['summary']['peak']['rps']:.2f} requests/s",
+        f"{format_measurement(report['summary']['peak']['rps'], '.2f')} requests/s",
         f"- Median throughput: "
-        f"{report['summary']['median']['rps']:.2f} requests/s",
+        f"{format_measurement(report['summary']['median']['rps'], '.2f')} requests/s",
     ]
 
     cpu = report["summary"]["peak"]["cpu_percent"]
     memory = report["summary"]["peak"]["memory_percent"]
 
     lines.append(
-        f"- CPU: {cpu:.2f}%"
+        f"- CPU: {format_measurement(cpu, '.2f')}%"
         if cpu is not None
-        else "- CPU: not supplied"
+        else ("- CPU: 無効／算出不可" if any(item["metric"] == "cpu_percent" and item["status"] == "INVALID_DATA" for item in report["findings"]) else "- CPU: not supplied")
     )
     lines.append(
-        f"- Memory: {memory:.2f}%"
+        f"- Memory: {format_measurement(memory, '.2f')}%"
         if memory is not None
-        else "- Memory: not supplied"
+        else ("- Memory: 無効／算出不可" if any(item["metric"] == "memory_percent" and item["status"] == "INVALID_DATA" for item in report["findings"]) else "- Memory: not supplied")
     )
 
     lines.extend(
@@ -619,7 +622,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     )
 
     for item in report["findings"]:
-        if item["kind"] == "threshold":
+        if item["status"] == "INVALID_DATA":
+            lines.append(f"- INVALID_DATA: {item['metric']} 無効／算出不可 ({item['reason']}; source={item.get('source', 'current')}; sample={item.get('sample', 'n/a')})")
+        elif item["kind"] == "threshold":
             lines.append(
                 f"- {item['status']}: "
                 f"{item['metric']}={item['actual']} "
@@ -664,24 +669,26 @@ def render_markdown(report: dict[str, Any]) -> str:
                 [
                     f"### {endpoint_name}",
                     "",
-                    f"- Requests: {endpoint['requests']:.0f}",
-                    f"- Failures: {endpoint['failures']:.0f}",
+                    f"- Requests: {format_measurement(endpoint['requests'], '.0f')}",
+                    f"- Failures: {format_measurement(endpoint['failures'], '.0f')}",
                     (
                         "- Error rate: "
-                        f"{endpoint['error_rate_percent']:.3f}%"
+                        f"{format_measurement(endpoint['error_rate_percent'], '.3f')}%"
                     ),
-                    f"- p95: {endpoint['p95_ms']:.2f} ms",
-                    f"- p99: {endpoint['p99_ms']:.2f} ms",
+                    f"- p95: {format_measurement(endpoint['p95_ms'], '.2f')} ms",
+                    f"- p99: {format_measurement(endpoint['p99_ms'], '.2f')} ms",
                     (
                         "- Throughput: "
-                        f"{endpoint['rps']:.2f} requests/s"
+                        f"{format_measurement(endpoint['rps'], '.2f')} requests/s"
                     ),
                     "",
                 ]
             )
 
             for item in endpoint["findings"]:
-                if item["kind"] == "endpoint_threshold":
+                if item["status"] == "INVALID_DATA":
+                    lines.append(f"- INVALID_DATA: {item['metric']} 無効／算出不可 ({item['reason']})")
+                elif item["kind"] == "endpoint_threshold":
                     lines.append(
                         f"- {item['status']}: "
                         f"{item['metric']}={item['actual']} "
@@ -901,9 +908,12 @@ def build_report(
                 policy,
             )
 
-            baseline_endpoint = baseline_endpoint_map.get(
-                endpoint.key
-            )
+            baseline_endpoint = baseline_endpoint_map.get(endpoint.key)
+            if baseline_endpoint is not None:
+                baseline_quality = row_quality(baseline_endpoint, source="baseline")
+                for item in baseline_quality:
+                    item["endpoint"] = endpoint.key
+                findings_for_endpoint.extend(baseline_quality)
 
             if (
                 baseline_endpoint is not None
@@ -929,10 +939,7 @@ def build_report(
                 "name": endpoint.name,
                 "requests": endpoint.requests,
                 "failures": endpoint.failures,
-                "error_rate_percent": round(
-                    endpoint.error_rate_percent,
-                    3,
-                ),
+                "error_rate_percent": round(endpoint.error_rate_percent, 3) if endpoint.error_rate_percent is not None else None,
                 "p95_ms": endpoint.p95_ms,
                 "p99_ms": endpoint.p99_ms,
                 "rps": endpoint.rps,
@@ -949,21 +956,14 @@ def build_report(
             warmup_seconds,
         )
         baseline_summary = summarize(evaluated_baseline_rows)
+        for item in baseline_summary["data_quality"]:
+            item["source"] = "baseline"
+        findings.extend(baseline_summary["data_quality"])
 
         if comparability is None or comparability["status"] == "COMPARABLE":
             findings.extend(compare_baseline(summary, baseline_summary, policy["regression_fail"]))
 
     all_findings = findings + endpoint_findings
-    has_failures = any(
-        item["status"] == "FAIL"
-        for item in all_findings
-    )
-
-    has_warnings = any(
-        item["status"] == "WARN"
-        for item in all_findings
-    )
-
     resets_confirmed = (
         stats_reset_detected
         and (
@@ -985,16 +985,16 @@ def build_report(
         )
     # Round only for output, after all verdict checks have used raw values.
     for output_summary in (summary, baseline_summary):
-        if output_summary is not None:
+        if output_summary is not None and output_summary["latest"]["error_rate_percent"] is not None:
             output_summary["latest"]["error_rate_percent"] = round(
                 output_summary["latest"]["error_rate_percent"], 3
             )
 
-    return {
-        "report_schema_version": "1.1",
+    return finite_output({
+        "report_schema_version": "1.2",
         "source": str(result_path),
         "baseline_source": str(baseline_path) if baseline_path else None,
-        "verdict": "FAIL" if has_failures else ("PASS_WITH_WARNINGS" if has_warnings else "PASS"),
+        "verdict": determine_verdict(all_findings),
         "summary": summary,
         "baseline_summary": baseline_summary,
         "policy": policy,
@@ -1015,7 +1015,7 @@ def build_report(
             "Capacity conclusions apply only to the tested workload, duration, environment, and data volume.",
         ],
         "endpoints": endpoint_results,
-    }
+    })
 
 
 def main() -> None:
@@ -1042,7 +1042,7 @@ def main() -> None:
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_md.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    args.output_json.write_text(serialize_report(report), encoding="utf-8")
     args.output_md.write_text(render_markdown(report), encoding="utf-8")
     print(f"{report['verdict']}: wrote {args.output_json} and {args.output_md}")
 

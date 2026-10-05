@@ -446,7 +446,7 @@ def test_build_report_includes_endpoint_analysis() -> None:
         ),
     )
 
-    assert report["report_schema_version"] == "1.1"
+    assert report["report_schema_version"] == "1.2"
     assert "GET /health" in report["endpoints"]
     assert "GET /items" in report["endpoints"]
 
@@ -597,3 +597,210 @@ def test_endpoint_rps_does_not_cause_failure() -> None:
         finding["status"] == "FAIL"
         for finding in findings
     )
+
+
+@pytest.fixture
+def quality_inputs(tmp_path: Path):
+    policy = json.loads((ROOT / "config" / "thresholds.json").read_text())
+    policy["evaluation"]["warmup_seconds"] = 0
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy))
+
+    def write_rows(rows, filename="history.csv"):
+        path = tmp_path / filename
+        columns = "timestamp,users,requests,failures,avg_ms,p95_ms,p99_ms,rps,cpu_percent,memory_percent".split(",")
+        defaults = dict(timestamp=0, users=10, requests=100, failures=0,
+                        avg_ms=20, p95_ms=100, p99_ms=150, rps=100,
+                        cpu_percent=20, memory_percent=30)
+        path.write_text(",".join(columns) + "\n" + "".join(
+            ",".join(str({**defaults, "timestamp": index, **row}[key]) for key in columns) + "\n"
+            for index, row in enumerate(rows)
+        ))
+        return path
+
+    def write_endpoint(row, filename="endpoint.csv"):
+        path = tmp_path / filename
+        defaults = dict(requests=100, failures=0, p95_ms=100, p99_ms=150, rps=100)
+        values = {**defaults, **row}
+        path.write_text("Type,Name,Request Count,Failure Count,95%,99%,Requests/s\n"
+                        + "GET,/items," + ",".join(str(values[key]) for key in defaults) + "\n")
+        return path
+
+    return policy_path, write_rows, write_endpoint
+
+
+@pytest.mark.parametrize("metric", ["requests", "failures", "p95_ms", "p99_ms", "rps", "users", "avg_ms", "cpu_percent", "memory_percent"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_nonfinite_history_cannot_pass(quality_inputs, metric, value, position):
+    policy, history, _ = quality_inputs
+    rows = [{}, {}, {}]
+    rows[position] = {metric: value}
+    report = MODULE.build_report(history(rows), policy)
+    assert report["verdict"] == "INVALID_DATA"
+    invalid = [item for item in report["findings"] if item["status"] == "INVALID_DATA"]
+    assert any(item["metric"] == metric and item["reason"] and item["sample"] == position + 1 for item in invalid)
+    assert not any(item["metric"] == metric and item["status"] == "PASS" for item in report["findings"])
+    serialized = MODULE.serialize_report(report)
+    if position == 2:
+        assert json.loads(serialized)["summary"]["latest"][metric] is None
+    assert "INVALID_DATA" in MODULE.render_markdown(report)
+    assert "無効／算出不可" in MODULE.render_markdown(report)
+
+
+@pytest.mark.parametrize("row,metric", [
+    ({"requests": 0}, "requests"),
+    ({"requests": 0, "failures": 1}, "requests"),
+    ({"requests": -1}, "requests"),
+    ({"failures": -1}, "failures"),
+    ({"failures": 101}, "failures"),
+    ({"p95_ms": -1}, "p95_ms"),
+    ({"p99_ms": -1}, "p99_ms"),
+    ({"rps": -1}, "rps"),
+])
+def test_invalid_counts_and_negative_measurements(quality_inputs, row, metric):
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([row]), policy, endpoint_path=endpoint(row))
+    assert report["verdict"] == "INVALID_DATA"
+    for findings in (report["findings"], report["endpoints"]["GET /items"]["findings"]):
+        assert any(item["metric"] == metric and item["status"] == "INVALID_DATA" and item["reason"] for item in findings)
+        if "requests" in row or "failures" in row:
+            assert not any(item["metric"] in ("p95_ms", "p99_ms", "error_rate_percent") and item["status"] == "PASS" for item in findings)
+    if "requests" in row or "failures" in row:
+        assert report["summary"]["latest"]["error_rate_percent"] is None
+        assert report["endpoints"]["GET /items"]["error_rate_percent"] is None
+    MODULE.serialize_report(report)
+    MODULE.render_markdown(report)
+
+
+@pytest.mark.parametrize("metric", ["requests", "failures", "p95_ms", "p99_ms", "rps"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), -1])
+@pytest.mark.parametrize("source", ["current", "baseline"])
+def test_endpoint_quality_and_comparison(quality_inputs, metric, value, source):
+    policy, history, endpoint = quality_inputs
+    current = endpoint({metric: value} if source == "current" else {})
+    baseline = endpoint({metric: value} if source == "baseline" else {}, "baseline-endpoint.csv")
+    report = MODULE.build_report(history([{}]), policy, endpoint_path=current, baseline_endpoint_path=baseline)
+    assert report["verdict"] == "INVALID_DATA"
+    findings = report["endpoints"]["GET /items"]["findings"]
+    assert any(item["metric"] == metric and item["status"] == "INVALID_DATA" and item.get("source") == source for item in findings)
+    MODULE.serialize_report(report)
+    assert "INVALID_DATA" in MODULE.render_markdown(report)
+
+
+@pytest.mark.parametrize("metric", ["p95_ms", "p99_ms", "rps"])
+@pytest.mark.parametrize("source", ["current", "baseline"])
+def test_invalid_history_baseline_comparison(quality_inputs, metric, source):
+    policy, history, _ = quality_inputs
+    current = history([{metric: float("nan")} if source == "current" else {}])
+    baseline = history([{metric: float("nan")} if source == "baseline" else {}], "baseline.csv")
+    report = MODULE.build_report(current, policy, baseline_path=baseline)
+    assert report["verdict"] == "INVALID_DATA"
+    comparison_metric = "median_rps" if metric == "rps" else metric
+    assert any(item["metric"] == comparison_metric and item["status"] == "INVALID_DATA" and source in item["reason"] for item in report["findings"])
+
+
+@pytest.mark.parametrize("breach,expected", [({}, "INVALID_DATA"), ({"cpu_percent": 90}, "INVALID_DATA"), ({"p99_ms": 600}, "FAIL")])
+def test_verdict_priority_retains_invalid_findings(quality_inputs, breach, expected):
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([breach]), policy, endpoint_path=endpoint({"p95_ms": float("nan")}))
+    assert report["verdict"] == expected
+    assert any(item["status"] == "INVALID_DATA" for item in report["endpoints"]["GET /items"]["findings"])
+    assert "INVALID_DATA" in MODULE.render_markdown(report)
+
+
+def test_valid_peak_failure_survives_invalid_sample(quality_inputs):
+    policy, history, _ = quality_inputs
+    report = MODULE.build_report(history([{"p95_ms": float("nan")}, {"p95_ms": 300}]), policy)
+    assert report["verdict"] == "FAIL"
+    assert {item["status"] for item in report["findings"] if item["metric"] == "p95_ms"} == {"FAIL", "INVALID_DATA"}
+
+
+@pytest.mark.parametrize("metric,limit", [("p95_ms", 250), ("p99_ms", 500)])
+@pytest.mark.parametrize("offset,status", [(-0.001, "PASS"), (0, "PASS"), (0.001, "FAIL")])
+def test_latency_threshold_boundaries(quality_inputs, metric, limit, offset, status):
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([{metric: limit + offset}]), policy, endpoint_path=endpoint({metric: limit + offset}))
+    assert report["verdict"] == status
+
+
+def test_zero_latency_and_rps_baselines_keep_existing_statuses(quality_inputs):
+    policy, history, endpoint = quality_inputs
+    zeros = {"p95_ms": 0, "p99_ms": 0, "rps": 0}
+    report = MODULE.build_report(history([{}]), policy, baseline_path=history([zeros], "baseline.csv"),
+                                 endpoint_path=endpoint({}), baseline_endpoint_path=endpoint(zeros, "baseline-endpoint.csv"))
+    assert report["verdict"] == "PASS"
+    assert len([item for item in report["findings"] if item["status"] == "NOT_EVALUATED"]) == 3
+    findings = report["endpoints"]["GET /items"]["findings"]
+    assert len([item for item in findings if item["status"] == "NOT_EVALUATED"]) == 2
+    assert next(item for item in findings if item["metric"] == "rps")["status"] == "INFO"
+
+
+def test_calculated_change_overflow_is_invalid(quality_inputs):
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([{}]), policy, baseline_path=history([{"p95_ms": 1e-308}], "baseline.csv"),
+                                 endpoint_path=endpoint({}), baseline_endpoint_path=endpoint({"p95_ms": 1e-308}, "baseline-endpoint.csv"))
+    assert report["verdict"] == "INVALID_DATA"
+    for findings in (report["findings"], report["endpoints"]["GET /items"]["findings"]):
+        assert any(item["metric"] == "p95_ms" and item["status"] == "INVALID_DATA" and "non-finite" in item["reason"] for item in findings)
+    MODULE.serialize_report(report)
+
+
+def test_strict_json_serialization_rejects_accidental_nonfinite_values():
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            MODULE.serialize_report({"nested": {"accidental": value}})
+
+
+def test_excluded_warmup_invalid_measurement_does_not_affect_verdict(quality_inputs):
+    policy, history, _ = quality_inputs
+    config = json.loads(policy.read_text())
+    config["evaluation"]["warmup_seconds"] = 1
+    policy.write_text(json.dumps(config))
+    report = MODULE.build_report(history([{"p95_ms": float("nan")}, {}]), policy)
+    assert report["verdict"] == "PASS"
+    assert report["evaluation"]["excluded_rows"] == 1
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_timestamp_is_not_silently_excluded(quality_inputs, value):
+    policy, history, _ = quality_inputs
+    config = json.loads(policy.read_text())
+    config["evaluation"]["warmup_seconds"] = 1
+    policy.write_text(json.dumps(config))
+    report = MODULE.build_report(history([{}, {"timestamp": value}, {}]), policy)
+    assert report["verdict"] == "INVALID_DATA"
+    assert any(item["metric"] == "timestamp" and item["status"] == "INVALID_DATA" for item in report["findings"])
+    MODULE.serialize_report(report)
+
+
+def test_median_overflow_cannot_pass_without_baseline(quality_inputs):
+    policy, history, _ = quality_inputs
+    report = MODULE.build_report(history([{"rps": 1e308}, {"rps": 1e308}]), policy)
+    assert report["verdict"] == "INVALID_DATA"
+    assert report["summary"]["median"]["rps"] is None
+    MODULE.serialize_report(report)
+
+
+def test_cli_writes_strict_json_and_invalid_markdown(quality_inputs, tmp_path):
+    import subprocess
+    policy, history, endpoint = quality_inputs
+    output_json = tmp_path / "analysis.json"
+    output_md = tmp_path / "analysis.md"
+    subprocess.run([
+        sys.executable, str(SCRIPT), str(history([{"p95_ms": float("nan")}])),
+        "--thresholds", str(policy), "--endpoint", str(endpoint({"requests": 0})),
+        "--output-json", str(output_json), "--output-md", str(output_md),
+    ], check=True, capture_output=True, text=True)
+
+    def reject_constant(value):
+        raise AssertionError(f"Non-standard JSON constant: {value}")
+
+    report = json.loads(output_json.read_text(), parse_constant=reject_constant)
+    assert report["report_schema_version"] == "1.2"
+    assert report["verdict"] == "INVALID_DATA"
+    assert report["summary"]["latest"]["p95_ms"] is None
+    assert report["endpoints"]["GET /items"]["error_rate_percent"] is None
+    markdown = output_md.read_text()
+    assert "INVALID_DATA" in markdown and "無効／算出不可" in markdown
+    assert "requests is zero" in markdown

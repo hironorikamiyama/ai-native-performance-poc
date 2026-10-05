@@ -1,21 +1,17 @@
 # AI-Native Performance Engineering PoC
 
-性能試験結果を、
+性能試験結果を、**Pythonによる決定論的な判定**、**AI / Codexによる分析・レビュー支援**、**人間による最終判断**に分離して扱うためのPoCです。
 
-**Pythonによる決定論的判定**  
-＋  
-**AIによる分析支援**  
-＋  
-**人間による最終判断**
-
-に分離したPoCです。
+本PoCでは、AIに性能試験の合否や原因をそのまま決めさせるのではなく、再現可能な数値判定はPythonで行い、AIはレビューや仮説整理を支援する役割に限定します。
 
 ## Quick Overview
 
+### 性能試験・分析フロー
+
 ```text
-Locust
-  ↓
 FastAPI
+  ↓
+Locust
   ↓
 CSV / manifest
   ↓
@@ -23,148 +19,257 @@ Python deterministic analysis
   ↓
 JSON / Markdown
   ↓
-AI hypothesis generation
+AI-assisted review / hypothesis support
   ↓
 Human review
 ```
 
-### 検証シナリオ
+### 開発・レビュー支援フロー
+
+```text
+PoC固有の設計方針
+  ↓
+Codex Skills
+  ↓
+Codexによるコードレビュー
+  ↓
+問題点・境界値・異常系の抽出
+  ↓
+Pythonコード修正
+  ↓
+pytestによる回帰確認
+```
+
+現時点では、性能分析ツール内部から外部AI APIを自動実行する構成にはしていません。  
+AI / Codexは、性能分析結果の解釈支援や開発時のコードレビュー支援として利用します。
+
+---
+
+## 目的
+
+このPoCの目的は、性能試験結果の分析において、
+
+- 数値的事実
+- 判定ルール
+- データ品質
+- 原因仮説
+- 人間による最終判断
+
+を分離することです。
+
+特に、以下を検証しています。
+
+- p95 / p99 / エラー率 / RPSを決定論的に評価できるか
+- baselineとの性能回帰を再現可能なロジックで判定できるか
+- 比較条件が異なるデータを誤って比較しないか
+- API / endpoint単位まで性能劣化箇所を絞り込めるか
+- 0件、NaN、Infinityなどの不正・不足データをPASSにしないか
+- AIが数値判定や原因断定を上書きしない構成にできるか
+- AIレビューで見つけた問題をpytestで再現・検証できるか
+
+---
+
+## 現在実装している機能
+
+- FastAPIによる検証用API
+- Locustによる負荷試験
+- `config/test_plan.json` による負荷条件管理
+- `config/thresholds.json` による判定基準管理
+- warm-up区間の除外
+- warm-up終了時のLocust統計リセット
+- p95 / p99 / エラー率の絶対閾値判定
+- median RPSによるシステム全体のスループット回帰判定
+- baselineとのp95 / p99性能回帰比較
+- manifestによる比較可能性確認
+- baselineが0の場合の `NOT_EVALUATED`
+- API / endpoint単位の性能分析
+- API別RPSの `INFO` 扱い
+- 不正・不足データの `INVALID_DATA` 判定
+- JSON / Markdownレポート生成
+- strict JSON出力
+- Codex Skillsを用いたコードレビュー支援
+- pytestによる正常系・異常系・境界値・回帰テスト
+
+---
+
+## 検証シナリオ
 
 | シナリオ | 内容 | 期待結果 |
 |---|---|---|
 | 正常系 | 閾値内かつbaselineから大きな劣化なし | PASS |
 | 性能劣化 | 絶対閾値内でもbaseline比で性能劣化 | FAIL |
 | エラー増加 | レスポンスタイム正常でもエラー率超過 | FAIL |
+| 不正データ | 評価に必要な測定値が不正・不足 | INVALID_DATA |
+| 比較不能 | データは有効だが相対比較できない | NOT_EVALUATED |
 
-### 設計方針
+---
 
-- p95 / p99 / エラー率 / RPSの数値判定はPythonで実施
-- baselineとの性能回帰もPythonで決定論的に判定
-- AIはPASS / FAILを決定しない
-- AIは原因を断定せず、傾向・仮説・追加確認項目を提示する
-- 最終的な原因判断・性能評価・リリース判断は人間が行う
-- 閾値はPoC用の暫定値とし、実案件ではSLA/SLO・利用モデル・業務要件から決定する
+## 設計方針
 
-### Test Status
+### Python
 
-```bash
-pytest -q
-```
+Pythonが担当します。
+
+- p95 / p99の集計
+- エラー率の計算
+- RPSの集計
+- データ品質チェック
+- 閾値比較
+- baseline比較
+- 回帰率計算
+- PASS / FAIL / INVALID_DATA判定
+- JSON / Markdown出力
+
+### AI / Codex
+
+AI / Codexが担当するのは支援です。
+
+- コードレビュー
+- 境界値・異常系の指摘
+- 性能劣化傾向の整理
+- リスク候補の提示
+- 原因仮説の整理
+- 追加確認項目の提案
+- 必要なログ・メトリクスの提示
+
+AIは、測定値だけから、
 
 ```text
-18 passed
+DBが原因です
 ```
 
----
+のような原因断定を行いません。
 
-## これは何か
+例えば、
 
-性能試験の結果分析で、
+```text
+DB接続待ちの可能性があります。
 
-**「数値的事実」と「原因仮説」を分離する**
+確認には、
+接続プール利用率、
+SQL実行時間、
+ロック状況、
+DB CPUなどの追加情報が必要です。
+```
 
-ことを目的としたPoCです。
+のように、仮説と確認事項を分けて扱います。
 
-現場で生成AIを利用する場合、
+### Human
 
-「AIに性能試験結果を渡したところ、根拠が十分でないにもかかわらず原因を断定した」
+人間が担当します。
 
-という問題が起こる可能性があります。
+- 性能要件の決定
+- 閾値の決定
+- AI仮説の検証
+- 原因の最終判断
+- 改善策の決定
+- 性能評価の承認
+- リリース可否判断
 
-そのため本PoCでは、
-
-- 数値計算
-- 閾値判定
-- baseline比較
-- PASS / FAIL判定
-
-をPythonの決定論的ロジックで行います。
-
-AIはその結果をもとに、
-
-- 性能劣化の傾向
-- リスク候補
-- 原因仮説
-- 追加調査項目
-
-を整理する役割に限定しています。
+> AIは原因を決定するためではなく、人間の調査・判断を支援するために利用します。
 
 ---
 
-## 背景
+## 判定ステータス
 
-「AI × 性能試験」というテーマについて、自分自身で
+| status / verdict | 意味 |
+|---|---|
+| `PASS` | 有効な測定値があり、評価基準内 |
+| `FAIL` | 有効な測定値があり、評価基準を超過 |
+| `PASS_WITH_WARNINGS` | サービス判定はFAILではないが、リソース警告あり |
+| `INVALID_DATA` | 評価に必要な測定値が不正または不足 |
+| `NOT_EVALUATED` | データ自体は有効だが、比較・評価を実施できない |
+| `INFO` | 判定には使用しない参考情報 |
+| `NOT_COMPARABLE` | baselineとcurrentの比較条件が一致しない |
 
-**AIにどこまで任せてもよいのか**
+総合verdictの優先順位は以下です。
 
-を検証するために作成しました。
+```text
+FAIL
+  ↓
+INVALID_DATA
+  ↓
+PASS_WITH_WARNINGS
+  ↓
+PASS
+```
 
-単にLocustを動かすことではなく、
-
-**性能試験 → 機械判定 → AI分析 → Human Review**
-
-という一連のプロセスを検証対象としています。
-
----
-
-## 分かったこと / 工夫した点
-
-- 閾値判定・baseline差分検出はPythonの決定論的ロジックとして実装
-- AIには数値計算やPASS / FAIL判定を任せない
-- AIには「数値の解釈」「リスク候補」「原因仮説」「追加調査案」を担当させる
-- 証拠のないCPU / DB / ネットワーク等の原因断定を禁止
-- Locust実行結果からp95 / p99 / エラー率 / RPSを自動評価
-- ウォームアップ区間を評価対象から除外
-- ウォームアップ終了時にLocustの累積統計をリセット
-- 最終累積エラー率と、一時的な最大エラー率を分離
-- baselineと比較対象の条件が異なる場合は回帰判定を抑止
-- baseline値が0の場合は無理に変化率を算出せず `NOT_EVALUATED` とする
-- 正常系・性能劣化・エラー増加をpytestでテスト
-- JSON / Markdownレポートをschema version `1.0` として固定
-- 負荷試験そのものの実行成否と、性能基準のPASS / FAILを分離
+有効な測定によるFAILとINVALID_DATAが同時に存在する場合は、確定している閾値違反を隠さないため `FAIL` を維持し、不正データの内容はfindingsに残します。
 
 ---
 
-## このPoCで仮設定した標準
+## 不正・不足データの扱い
+
+測定値の妥当性は、集計・除算・閾値比較・baseline比較の前に確認します。
+
+以下は `INVALID_DATA` とします。
+
+- `requests == 0`
+- `requests < 0`
+- `failures < 0`
+- `failures > requests`
+- p95が負数
+- p99が負数
+- RPSが負数
+- NaN
+- `+Infinity`
+- `-Infinity`
+- 有限値から算出した中央値や変化率が非有限になる場合
+
+件数が不正な場合、エラー率を便宜的に0%とは扱いません。  
+また、requestsが0の場合はp95 / p99にも有効な測定根拠がないため、PASSにはしません。
+
+任意項目であるCPU / Memoryが未提供の場合は、従来どおり評価を省略します。
+
+### `NOT_EVALUATED` との違い
+
+`INVALID_DATA` は、測定値そのものに問題がある場合です。
+
+一方、`NOT_EVALUATED` はデータ自体は有効でも、評価式を適用できない場合です。
+
+例：
+
+```text
+baseline RPS = 0
+→ 相対的なRPS低下率を算出できない
+→ NOT_EVALUATED
+```
+
+### warm-up区間と不正データ
+
+warm-upとして正式に除外された行は、評価対象外です。
+
+一方、評価対象区間に不正な行がある場合は、その行を黙って捨てて残りだけでPASSにはしません。
+
+有効な測定から明確なFAILが確認できる場合、そのFAILは維持します。
+
+---
+
+## このPoCで仮設定した基準
 
 | 項目 | 仮設定 | 理由 |
-|---|---|---|
-| 負荷試験ツール | Locust 2.40.4 / headless | Pythonでシナリオを実装でき、CIから実行しやすい |
-| 一次データ | Locust `*_stats_history.csv` | 時系列の応答時間・件数・失敗数を機械処理できる |
-| 実行証跡 | `manifest.json` | ツール、対象環境、負荷条件、実行コマンドを残す |
-| 機械判定結果 | JSON | CI連携や再分析に利用する |
-| 人向けレポート | Markdown | 根拠、リスク、追加確認をレビューしやすい |
-| Report Schema | `1.0` | 出力フォーマットを固定する |
+|---|---:|---|
+| 負荷試験ツール | Locust 2.40.4 / headless | Pythonでシナリオを実装できる |
+| warm-up | 10秒 | 試験開始直後の過渡状態を除外 |
+| p95 | 250ms以下 | PoC用の暫定基準 |
+| p99 | 500ms以下 | PoC用の暫定基準 |
+| error rate | 1.0%以下 | PoC用の暫定基準 |
+| CPU | 80%以下 | 超過時はWARN |
+| Memory | 85%以下 | 超過時はWARN |
+| baseline比 p95悪化 | 20%以下 | PoC用の暫定基準 |
+| baseline比 p99悪化 | 20%以下 | PoC用の暫定基準 |
+| median RPS低下 | 20%以下 | システム全体の回帰判定 |
+| Report Schema | `1.2` | 出力形式を固定 |
 
-これらは実案件での採用決定ではなく、PoCでの検証用の暫定案です。
+これらは業界標準値ではありません。
 
-実案件では、
+**判定ロジックを再現可能にするためのPoC用暫定値**です。
 
-- 既存基盤
-- SLA / SLO
-- 業務ピーク
-- 監視方式
-- セキュリティ制約
-
-などを確認した上で決定します。
-
----
-
-## 全体像
-
-1. FastAPIの検証用APIを起動する
-2. `config/test_plan.json` から負荷条件を読み、Locustを実行する
-3. Locust結果をCSVとして保存する
-4. Pythonでp95 / p99 / エラー率 / RPSを評価する
-5. manifestでbaselineとの比較可能性を確認する
-6. baselineとの差分を決定論的に判定する
-7. JSON / Markdownレポートを生成する
-8. AIが傾向・リスク・原因仮説を整理する
-9. 人間が最終判断する
+実案件では、SLA / SLO、利用モデル、ピーク負荷、データ量、既存監視基盤などを確認した上で決定します。
 
 ---
 
-## 0. セットアップ
+## セットアップ
 
 ```bash
 python -m venv .venv
@@ -182,7 +287,7 @@ Windows PowerShellでは、
 
 ---
 
-## 1. FastAPIを起動
+## FastAPIを起動
 
 ```bash
 uvicorn app.main:app --reload --port 8000
@@ -197,11 +302,11 @@ curl \
   "http://127.0.0.1:8000/items?delay_ms=20&fail_rate=0&limit=3"
 ```
 
-`delay_ms` と `fail_rate` は、意図的に性能劣化やエラー増加を発生させるためのPoC専用パラメータです。
+`delay_ms` と `fail_rate` は、意図的に性能劣化やエラー増加を再現するためのPoC専用パラメータです。
 
 ---
 
-## 2. シナリオと判定基準
+## 負荷試験シナリオ
 
 負荷条件は、
 
@@ -217,33 +322,7 @@ config/thresholds.json
 
 に分離しています。
 
-現在のPoCでは、
-
-```text
-warmup_seconds = 10秒
-
-p95 <= 250ms
-p99 <= 500ms
-error rate <= 1%
-
-CPU <= 80%    : WARN
-Memory <= 85% : WARN
-
-baseline比
-p95悪化 <= 20%
-p99悪化 <= 20%
-median RPS低下 <= 20%
-```
-
-を暫定値として設定しています。
-
-これらは業界標準値を意味するものではありません。
-
-**判定ロジックを再現可能にするためのPoC用固定値**です。
-
-実案件ではSLA / SLO、利用モデル、ピーク負荷、業務要件から決定します。
-
-### シナリオ
+現在のシナリオは以下です。
 
 - `smoke` : 疎通確認
 - `baseline` : 性能比較元
@@ -261,7 +340,7 @@ python scripts/run_scenario.py \
 
 ---
 
-## 3. Locustで負荷試験
+## Locustで負荷試験
 
 ```bash
 python scripts/run_scenario.py \
@@ -281,31 +360,33 @@ results/runs/<run-id>/
 
 以下に保存されます。
 
-主な成果物は、
+主なファイルは、
 
 ```text
 locust_stats_history.csv
+locust_stats.csv
 manifest.json
 ```
 
 です。
 
-`manifest.json` には、
+`manifest.json` には、例えば以下を記録します。
 
-- ツール
-- 対象
+- 使用ツール
+- 対象環境
 - シナリオ
 - ユーザー数
 - spawn rate
 - duration
 - warm-up設定
+- 統計リセット方式
 - 実行条件
-
-などを記録します。
 
 ---
 
-## 4. サンプルデータを分析
+## 性能試験結果を分析
+
+### サンプルデータ
 
 ```bash
 python performance-test-analysis/scripts/analyze_results.py \
@@ -316,38 +397,22 @@ python performance-test-analysis/scripts/analyze_results.py \
   --output-md results/sample-analysis.md
 ```
 
-性能基準を超過した場合、
-
-```text
-FAIL
-```
-
-となります。
-
-CPU・Memoryについては、単独で性能不合格の根拠とせず、
-
-```text
-WARN
-```
-
-として原因調査を促します。
-
----
-
-## 5. 実際のLocust結果を分析
+### Locust実行結果 + endpoint分析
 
 ```bash
 python performance-test-analysis/scripts/analyze_results.py \
-  results/runs/regression-v1/locust_stats_history.csv \
-  --baseline results/runs/baseline-v1/locust_stats_history.csv \
-  --manifest results/runs/regression-v1/manifest.json \
-  --baseline-manifest results/runs/baseline-v1/manifest.json \
+  results/runs/regression-reset-v2/locust_stats_history.csv \
   --thresholds config/thresholds.json \
-  --output-json results/locust-analysis.json \
-  --output-md results/locust-analysis.md
+  --baseline results/runs/baseline-reset-v1/locust_stats_history.csv \
+  --manifest results/runs/regression-reset-v2/manifest.json \
+  --baseline-manifest results/runs/baseline-reset-v1/manifest.json \
+  --endpoint results/runs/regression-reset-v2/locust_stats.csv \
+  --baseline-endpoint results/runs/baseline-reset-v1/locust_stats.csv \
+  --output-json results/locust-analysis-endpoint-v1.json \
+  --output-md results/locust-analysis-endpoint-v1.md
 ```
 
-比較条件が一致している場合だけbaselineとの回帰判定を行います。
+比較条件が一致している場合だけbaseline回帰判定を行います。
 
 条件が異なる場合は、
 
@@ -359,7 +424,23 @@ NOT_COMPARABLE
 
 ---
 
-## ウォームアップ区間の扱い
+## baseline比較の前提
+
+baselineとcurrentを比較する際は、manifestを用いて比較可能性を確認します。
+
+主に以下の条件を確認します。
+
+- tool
+- target
+- workload signature
+- warm-up duration
+- statistics reset mode
+
+比較条件が一致しない場合、数値上の差があっても同一条件での性能回帰とはみなしません。
+
+---
+
+## warm-up区間の扱い
 
 性能試験開始直後は、
 
@@ -377,25 +458,17 @@ evaluation.warmup_seconds
 
 で指定した期間を評価対象から除外します。
 
-現在は、
+現在は10秒です。
 
-```text
-10秒
-```
-
-を設定しています。
-
-さらにLocust側でも、ウォームアップ終了後に、
+さらにLocust側でもwarm-up終了後に、
 
 ```python
 runner.stats.reset_all()
 ```
 
-を実行します。
+を実行し、その後の定常区間を新しい測定期間として扱います。
 
-これにより、その後の定常区間を新しい測定期間として扱います。
-
-分析レポートには、
+レポートには、例えば以下を記録します。
 
 ```text
 ## Evaluation window
@@ -407,15 +480,13 @@ runner.stats.reset_all()
 - Baseline stats reset detected: True
 ```
 
-のように評価窓を記録します。
-
 ---
 
 ## エラー率の扱い
 
 Locustのリクエスト数・失敗数は累積値です。
 
-試験開始直後はリクエスト数が少ないため、少数のエラーでも一時的に高いエラー率になります。
+試験開始直後はリクエスト数が少ないため、少数のエラーでも一時的に高いエラー率になる可能性があります。
 
 そのため本PoCでは、
 
@@ -437,18 +508,35 @@ Locustのリクエスト数・失敗数は累積値です。
 
 で算出します。
 
-全体・API別のエラー率のPASS / FAIL判定には、丸め前の値を使用します。
-JSON / Markdownの表示は小数3桁に丸めるため、1.0004%は1.000%と表示されますが、閾値1.0%に対する判定はFAILです。
+### 判定値と表示値を分離する
 
-一時的なエラー集中についても無視せず、最大値としてレポートに残します。
+PASS / FAIL判定には、丸め前のraw値を使用します。
+
+例えば閾値が `1.0%` の場合、
+
+```text
+0.9996% → PASS
+1.0000% → PASS
+1.0004% → FAIL
+```
+
+です。
+
+JSON / Markdownの表示では小数3桁へ丸める場合がありますが、表示用の丸め値を判定には使用しません。
+
+```text
+判定
+→ raw値
+
+表示
+→ 丸めた値
+```
 
 ---
 
 ## スループット回帰の扱い
 
-応答性能が悪化すると、同じユーザー数でも単位時間あたりの処理量が低下する可能性があります。
-
-そこで、
+システム全体では、
 
 ```text
 baselineのmedian RPS
@@ -457,7 +545,7 @@ baselineのmedian RPS
 と、
 
 ```text
-比較対象のmedian RPS
+currentのmedian RPS
 ```
 
 を比較します。
@@ -473,13 +561,7 @@ RPS低下率 =
 
 です。
 
-現在のPoCでは、
-
-```text
-20%
-```
-
-を許容上限としています。
+現在は20%を許容上限としています。
 
 ただしRPSは、
 
@@ -487,124 +569,81 @@ RPS低下率 =
 - ネットワーク
 - 実行環境
 - wait time
+- 他endpointの処理時間
 
 などにも影響されます。
 
-そのため、RPS低下だけからアプリケーション原因とは断定しません。
+そのため、RPS低下だけから原因を断定しません。
 
 ---
 
-## baselineが0の場合
+## API / endpoint単位の性能分析
 
-相対変化率では、baselineが0の場合に正常な百分率を計算できません。
+`locust_stats.csv` を利用して、API / endpoint単位の性能分析を行います。
 
-そのため本PoCでは、
+現在は以下を評価します。
 
-```text
-baseline = 0
-```
+- p95
+- p99
+- エラー率
+- baseline比のp95性能回帰
+- baseline比のp99性能回帰
+- endpoint RPSの変化
 
-の場合、
+### endpoint RPSはINFO
 
-```text
-0%変化
-```
+endpoint単位のRPS低下は、単独ではFAIL判定に使用しません。
 
-とは扱わず、
-
-```text
-NOT_EVALUATED
-```
-
-とします。
-
-無理に数値を生成して誤ったPASS判定を行わないための設計です。
-
----
-
-## 6. 判定の責任分界
-
-本PoCでは、性能試験におけるAIの役割を、
-
-**分析支援**
-
-に限定します。
-
-### Python
-
-Pythonが担当するもの：
-
-- p95 / p99の計算
-- エラー率の計算
-- RPSの集計
-- 閾値比較
-- baseline比較
-- 回帰率計算
-- PASS / FAIL判定
-
-### AI / Codex Skill
-
-AIが担当するもの：
-
-- 性能劣化傾向の整理
-- リスク候補の提示
-- 原因仮説の整理
-- 追加確認項目の提案
-- 必要なログ・メトリクスの提示
-
-AIは、
+あるendpointの処理時間が増加すると、Locust全体のユーザー処理サイクルが遅くなり、正常な別endpointの実行回数まで低下する場合があるためです。
 
 ```text
-DBが原因です
+システム全体のmedian RPS
+→ 性能回帰の判定対象
+
+endpoint単位のRPS
+→ INFOとして参考表示
 ```
 
-のような原因断定を行いません。
-
-例えば、
+例：
 
 ```text
-DB接続待ちの可能性があります。
+GET /health
 
-確認するためには、
-接続プール利用率、
-SQL実行時間、
-ロック状況、
-DB CPUなどの確認が必要です。
+PASS: p95
+PASS: p99
+PASS: error rate
+PASS: p95 baseline regression
+PASS: p99 baseline regression
+INFO: RPS decreased
+
+
+GET /items
+
+FAIL: p95 threshold
+PASS: p99 threshold
+FAIL: error rate
+FAIL: p95 baseline regression
+FAIL: p99 baseline regression
+INFO: RPS decreased
 ```
 
-という仮説・追加調査形式で出力します。
+これにより、
 
-### Human
+```text
+システム全体でFAIL
+  ↓
+endpointごとの結果を確認
+  ↓
+どのAPIで遅延・エラー・回帰が発生したか絞り込む
+```
 
-人間が担当するもの：
-
-- 性能要件の決定
-- 閾値の決定
-- AI仮説の検証
-- 原因の最終判断
-- 改善策の決定
-- 性能評価の承認
-- リリース可否判断
-
-> AIは原因を決定するためではなく、人間の調査・判断を支援するために利用します。
-
-### Principles
-
-1. AIは性能試験のPASS / FAILを決定しない。
-2. AIは測定データだけから原因を断定しない。
-3. AIが提示する原因は仮説として扱う。
-4. 数値判定はPythonによる決定論的ロジックで行う。
-5. 最終的な性能評価・原因判断・リリース判断は人間が行う。
+という調査ができます。
 
 ---
 
 ## 実行成否と性能判定
 
-負荷試験が技術的に完走したことと、
-
-**性能要件を満たしたこと**
-
-は別です。
+負荷試験が技術的に完走したことと、性能要件を満たしたことは別です。
 
 Locustには、
 
@@ -614,7 +653,7 @@ Locustには、
 
 を指定しています。
 
-そのため意図的なHTTP 503などが発生しても、負荷試験自体は最後まで実行できます。
+そのため、意図的なHTTP 503などが発生しても、負荷試験自体は最後まで実行できます。
 
 | 判定 | 意味 | 判定主体 |
 |---|---|---|
@@ -640,7 +679,7 @@ performance verdict = FAIL
 
 ---
 
-## 7. 出力フォーマット
+## 出力フォーマット
 
 分析結果は、
 
@@ -651,19 +690,18 @@ Markdown
 
 の2形式で生成します。
 
-JSONは機械処理用、
+- JSON: 機械処理・再利用向け
+- Markdown: 人間によるレビュー向け
 
-Markdownはレビュー用です。
-
-現在のレポート形式は、
+現在のレポートスキーマは、
 
 ```text
-report_schema_version = 1.0
+report_schema_version = 1.2
 ```
 
-として固定しています。
+です。
 
-主要フィールドは、
+主なフィールドは以下です。
 
 ```text
 report_schema_version
@@ -677,93 +715,109 @@ evaluation
 findings
 comparability
 limitations
+endpoints
 ```
 
-です。
+schema 1.2では、データ品質判定に対応するため、
 
-`verdict` はAI判断ではなく、
+- `INVALID_DATA`
+- 数値欄の `null`
+- summary内のdata quality情報
 
-**Pythonの決定論的ロジックによる判定結果**
+を扱います。
 
-です。
+非有限値はJSONへ `NaN` / `Infinity` として出力せず、数値欄を `null` にします。  
+元の値がNaN / Infinity等だったことはfindingのreasonに残します。
+
+最終シリアライズでは `allow_nan=False` を使用し、想定外の非有限値がJSONへ混入することも防ぎます。
 
 ---
 
-## 8. Codex Skillとして使う
+## Codex Skillsによるレビュー支援
 
-`performance-test-analysis` をCodex Skillとして利用します。
-
-依頼例：
+PoC固有の設計・レビュー方針は、
 
 ```text
-performance-test-analysisを使って、
-Locust結果をbaselineと比較してください。
-
-数値的事実と原因仮説を分け、
-追加確認項目を示してください。
+.codex/skills/performance-poc/SKILL.md
 ```
 
-Skill側にも、
+に定義しています。
 
-- 原因を断定しない
-- 数値を勝手に再計算しない
-- Python判定を上書きしない
-- 事実と仮説を分ける
+Skillには、例えば以下のルールを記載しています。
 
-という制約を持たせます。
+- Pythonが決定論的な性能判定を行う
+- AIはPASS / FAILを上書きしない
+- AIは原因を証拠なしに断定しない
+- endpoint RPSはINFOとして扱う
+- baseline比較では比較可能性を確認する
+- 変更後はpytestで回帰確認する
+- 数値的事実と仮説を分ける
+
+### 実際に見つかった改善点
+
+Codexによるレビューでは、以下のような問題を検出しました。
+
+- 表示用に丸めたエラー率を閾値判定にも使用していた
+- request countが0の場合に正常なエラー率0%として扱える余地があった
+- NaN / Infinity等の非有限値がPASSになり得た
+- endpointの不正RPSがbaseline比較処理へ影響するケースがあった
+
+レビュー結果をそのまま採用するのではなく、
+
+```text
+指摘
+  ↓
+再現
+  ↓
+修正
+  ↓
+境界値・異常値テスト追加
+  ↓
+全pytest
+```
+
+の流れで検証しています。
 
 ---
 
-## 9. テスト
+## テスト
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
 
-現在、
+現在の結果：
 
 ```text
-18 passed
+181 passed
 ```
 
-を確認しています。
+主なテスト観点は以下です。
 
-特に以下の3パターンを明示的にテストしています。
-
-### 正常系
-
-```text
-絶対閾値：PASS
-baseline比較：PASS
-↓
-PASS
-```
-
-### 性能劣化
-
-```text
-絶対閾値：PASS
-baseline比p95：FAIL
-↓
-FAIL
-```
-
-絶対値では問題がなくても、
-
-**以前より大幅に性能が悪化している**
-
-ケースを検出します。
-
-### エラー増加
-
-```text
-p95：正常
-error rate：閾値超過
-↓
-FAIL
-```
-
-レスポンスタイムだけを見ることで、エラー増加を見逃さないことを確認します。
+- 正常時のPASS判定
+- レスポンスタイム劣化
+- エラー率増加
+- baseline比較
+- warm-up除外
+- Locust統計リセット検出
+- baselineが0の場合の `NOT_EVALUATED`
+- manifest不一致時の比較抑止
+- API別CSV読込
+- API別閾値判定
+- API別baseline比較
+- API別RPSを `INFO` として扱うこと
+- endpointのみ不正な場合の総合判定
+- request countが0の場合
+- requests / failuresの不整合
+- NaN / `+inf` / `-inf`
+- 負のp95 / p99 / RPS
+- FAILとINVALID_DATAの優先順位
+- 閾値直下・一致・直上
+- warm-up除外行に不正値がある場合
+- 非有限timestamp
+- 計算結果が非有限になる場合
+- strict JSON serialization
+- CLIによるJSON / Markdown出力
 
 ---
 
@@ -774,32 +828,37 @@ FAIL
 - 正常系をPASSにできるか
 - 性能劣化をFAILにできるか
 - エラー増加をFAILにできるか
-- 同じ入力に対して同じ判定結果になるか
+- 不正データをPASSにしないか
 - 比較不能な値を無理に数値化しないか
-- 数値的事実とAIの原因仮説を分離できるか
-- AIが原因を断定しないか
-- AIがPASS / FAILを上書きしないか
-- 最終判断を人間に残しているか
-- warm-up区間をbaseline / current双方から同条件で除外できるか
+- 同じ入力に対して同じ判定結果になるか
+- manifest不一致時に回帰判定を抑止できるか
+- endpoint単位まで劣化箇所を絞り込めるか
+- warm-up区間をbaseline / current双方で扱えるか
 - 最終累積エラー率と最大エラー率を区別できるか
-- RPS低下をbaselineと比較できるか
+- 判定用raw値と表示用丸め値を分離できるか
+- 数値的事実とAIの原因仮説を分離できるか
+- AIがPASS / FAILを上書きしないか
+- AIが原因を断定しないか
+- 最終判断を人間に残しているか
 
 ---
 
-## 次に実案件で確認すること
+## 実案件で確認すべきこと
+
+このPoCの閾値や条件をそのまま実案件へ適用することは想定していません。
+
+実案件では、例えば以下を確認する必要があります。
 
 - SLA / SLO
-- 通常時のユーザー数
-- ピーク時ユーザー数
+- 通常時・ピーク時のユーザー数
 - TPS / RPS
 - 将来の業務量増加率
 - ユーザー行動モデル
 - APIごとの利用比率
 - 実データ量
 - キャッシュ条件
-- ウォームアップ条件
-- Locust採用可否
-- 既存の性能試験ツール
+- warm-up条件
+- 利用可能な性能試験ツール
 - CI/CDとの連携方式
 - CloudWatch / Azure Monitor / Prometheus等の監視基盤
 - CPU / Memory / Disk I/O
@@ -819,174 +878,38 @@ FAIL
 
 ## 今後の拡張候補
 
-このPoCでは、まず性能試験結果の判定とAI分析の責任分界に焦点を当てています。
+現在は、性能試験結果の決定論的判定、データ品質確認、endpoint分析、AIとの責任分界に焦点を当てています。
 
-今後の拡張候補としては、
+今後は、
 
 ```text
 Locust
-↓
+  ↓
 アプリケーションログ
-↓
+  ↓
 DBメトリクス
-↓
+  ↓
 インフラメトリクス
-↓
+  ↓
 時刻同期
-↓
+  ↓
 相関分析
-↓
-AI仮説生成
-↓
+  ↓
+AIによる仮説整理
+  ↓
 Human Review
 ```
 
 のように、観測対象を広げることが考えられます。
 
-ただし、
+ただし、目標は、
 
 **AIが原因を自動決定するシステム**
 
-を目標とはしていません。
+ではありません。
 
 最終的な目的は、
 
 **人間が性能問題を調査するために必要な情報を、より早く整理できる仕組み**
 
 を作ることです。
-
-## API別性能分析
-
-`locust_stats.csv` を利用して、API / エンドポイント単位の性能分析を行えます。
-
-API別分析では、以下を評価します。
-
-- p95レスポンスタイム
-- p99レスポンスタイム
-- エラー率
-- baselineと比較したp95の性能回帰
-- baselineと比較したp99の性能回帰
-- API別RPSの変化（参考情報）
-
-### API別RPSの扱い
-
-API単位のRPS低下は、PASS / FAILの判定には使用しません。
-
-あるAPIの処理が遅くなると、Locust全体のユーザー処理サイクルが遅くなり、
-別のAPIの実行回数まで減少する場合があります。
-
-そのため、
-
-- システム全体のRPS低下は性能回帰の判定対象
-- API別RPS低下は `INFO` として参考表示
-- API別のp95 / p99 / エラー率はPASS / FAIL判定対象
-
-としています。
-
-### 出力例
-
-```text
-GET /health
-
-PASS: p95
-PASS: p99
-PASS: error rate
-PASS: p95 baseline regression
-PASS: p99 baseline regression
-INFO: RPS decreased
-
-
-GET /items
-
-FAIL: p95 threshold
-PASS: p99 threshold
-FAIL: error rate
-FAIL: p95 baseline regression
-FAIL: p99 baseline regression
-INFO: RPS decreased
-```
-
-このように、システム全体がFAILだった場合でも、
-
-```text
-システム全体がFAIL
-    ↓
-どのAPIで性能劣化が発生しているか確認
-    ↓
-p95 / p99 / error rate / baselineとの差を確認
-```
-
-という形で、問題箇所をAPI単位まで絞り込めます。
-
-### 実行例
-
-```bash
-python performance-test-analysis/scripts/analyze_results.py \
-  results/runs/regression-reset-v2/locust_stats_history.csv \
-  --thresholds config/thresholds.json \
-  --baseline results/runs/baseline-reset-v1/locust_stats_history.csv \
-  --endpoint results/runs/regression-reset-v2/locust_stats.csv \
-  --baseline-endpoint results/runs/baseline-reset-v1/locust_stats.csv \
-  --output-json results/locust-analysis-endpoint-v1.json \
-  --output-md results/locust-analysis-endpoint-v1.md
-```
-
-### JSON / Markdown出力
-
-API別分析結果は、JSONとMarkdownの両方へ出力されます。
-
-例：
-
-```text
-GET /items
-
-p95: 360 ms
-p99: 360 ms
-error rate: 2.681%
-RPS: 72.25 requests/s
-```
-
-baselineと比較した性能回帰も出力します。
-
-```text
-p95: 28 ms → 360 ms
-p99: 33 ms → 360 ms
-RPS: 139.50 → 72.25
-```
-
-ただし、RPSの低下はAPI自身の性能劣化とは限らないため、
-API単位では参考情報として扱います。
-
-### レポートスキーマ
-
-API別分析の追加に伴い、レポートスキーマを以下へ更新しています。
-
-```text
-report_schema_version: 1.1
-```
-
----
-
-## テスト
-
-現在のテスト結果：
-
-```text
-24 passed
-```
-
-主なテスト内容：
-
-- 通常時のPASS判定
-- レスポンスタイム劣化
-- エラー率増加
-- baseline比較
-- warm-up除外
-- Locust統計リセット検出
-- baselineが0の場合の `NOT_EVALUATED`
-- manifest不一致時の比較抑止
-- API別CSV読込
-- API別閾値判定
-- API別baseline比較
-- API別RPSを `INFO` として扱うこと
-- manifest不一致時にAPI別回帰判定を行わないこと
