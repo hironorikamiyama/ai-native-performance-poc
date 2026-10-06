@@ -565,217 +565,163 @@ def format_measurement(value, spec):
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    lines = [
-        "# Performance Test Analysis",
-        "",
-        f"- Report schema version: {report['report_schema_version']}",
-        f"- Service verdict: **{report['verdict']}**",
-        "",
-        "## Evaluation window",
-        "",
-        f"- Warm-up seconds: {report['evaluation']['warmup_seconds']}",
-        f"- Current rows excluded: {report['evaluation']['excluded_rows']}",
-        f"- Baseline rows excluded: "
-        f"{report['evaluation'].get('baseline_excluded_rows')}",
-        f"- Current stats reset detected: "
-        f"{report['evaluation']['stats_reset_detected']}",
-        f"- Baseline stats reset detected: "
-        f"{report['evaluation'].get('baseline_stats_reset_detected')}",
-        f"- Note: {report['evaluation']['note']}",
-        "",
-        "## Deterministic evidence",
-        "",
-        f"- Samples: {report['summary']['samples']}",
-        f"- Peak users: {format_measurement(report['summary']['peak']['users'], '.0f')}",
-        f"- Peak p95: {format_measurement(report['summary']['peak']['p95_ms'], '.2f')} ms",
-        f"- Peak p99: {format_measurement(report['summary']['peak']['p99_ms'], '.2f')} ms",
-        f"- Final cumulative error rate: "
-        f"{format_measurement(report['summary']['latest']['error_rate_percent'], '.3f')}%",
-        f"- Peak observed error rate: "
-        f"{format_measurement(report['summary']['peak']['error_rate_percent'], '.3f')}%",
-        f"- Peak throughput: "
-        f"{format_measurement(report['summary']['peak']['rps'], '.2f')} requests/s",
-        f"- Median throughput: "
-        f"{format_measurement(report['summary']['median']['rps'], '.2f')} requests/s",
-    ]
+    """Summarize existing evidence for human review without changing the report."""
+    def cell(value):
+        return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>")
 
-    cpu = report["summary"]["peak"]["cpu_percent"]
-    memory = report["summary"]["peak"]["memory_percent"]
+    def table(headers, rows):
+        if not rows:
+            return
+        def table_row(values):
+            return "| " + " | ".join(map(cell, values)) + " |"
 
-    lines.append(
-        f"- CPU: {format_measurement(cpu, '.2f')}%"
-        if cpu is not None
-        else ("- CPU: 無効／算出不可" if any(item["metric"] == "cpu_percent" and item["status"] == "INVALID_DATA" for item in report["findings"]) else "- CPU: not supplied")
-    )
-    lines.append(
-        f"- Memory: {format_measurement(memory, '.2f')}%"
-        if memory is not None
-        else ("- Memory: 無効／算出不可" if any(item["metric"] == "memory_percent" and item["status"] == "INVALID_DATA" for item in report["findings"]) else "- Memory: not supplied")
-    )
+        lines.append(table_row(headers))
+        lines.append(table_row(["---" for _ in headers]))
+        lines.extend(table_row(row) for row in rows)
+        lines.append("")
 
-    lines.extend(
-        [
-            "",
-            "## Checks",
-            "",
-        ]
-    )
+    def section(title):
+        lines.extend(["", f"## {title}", ""])
 
-    for item in report["findings"]:
-        if item["status"] == "INVALID_DATA":
-            lines.append(f"- INVALID_DATA: {item['metric']} 無効／算出不可 ({item['reason']}; source={item.get('source', 'current')}; sample={item.get('sample', 'n/a')})")
-        elif item["kind"] == "threshold":
-            lines.append(
-                f"- {item['status']}: "
-                f"{item['metric']}={item['actual']} "
-                f"(limit {item['limit']})"
-            )
-
-        elif item["status"] == "NOT_EVALUATED":
-            lines.append(
-                f"- NOT_EVALUATED: {item['metric']} "
-                f"({item.get('reason', 'Comparison unavailable')})"
-            )
-
-        elif item["metric"] == "median_rps":
-            lines.append(
-                f"- {item['status']}: median_rps decreased "
-                f"{item['decrease_percent']}% "
-                f"({item['baseline']} -> {item['current']}; "
-                f"limit {item['limit_percent']}%)"
-            )
-
-        else:
-            lines.append(
-                f"- {item['status']}: {item['metric']} changed "
-                f"{item['change_percent']}% "
-                f"({item['baseline']} -> {item['current']}; "
-                f"limit {item['limit_percent']}%)"
-            )
+    def comparison_row(item):
+        decrease = "decrease_percent" in item
+        change = item.get("decrease_percent" if decrease else "change_percent")
+        return [item["metric"],
+                f"{item.get('baseline')} → {item.get('current')}",
+                "算出不可" if change is None else f"{change}%（{'低下率' if decrease else '変化率'}）",
+                f"{item['limit_percent']}%" if "limit_percent" in item else "参考情報",
+                item["status"], item.get("reason", "")]
 
     endpoints = report.get("endpoints", {})
+    findings = [("全体", item) for item in report["findings"]]
+    findings.extend((name, item) for name, endpoint in endpoints.items() for item in endpoint["findings"])
+    problems = {"FAIL", "INVALID_DATA", "WARN", "NOT_EVALUATED"}
+    invalid = [(scope, item) for scope, item in findings if item["status"] == "INVALID_DATA"]
+    unevaluated = [(scope, item) for scope, item in findings if item["status"] == "NOT_EVALUATED"]
+    comparison = report.get("comparability")
+    has_baseline = report.get("baseline_summary") is not None or report.get("baseline_source") is not None
+    has_endpoint_comparison = any(item["kind"] in ("endpoint_regression", "endpoint_observation") or item.get("source") == "baseline"
+                                  for _, item in findings)
+    policy = report["policy"]
+    lines = ["# Performance Test Analysis", "", "## 1. 総合判定", "",
+             f"**総合verdict: {report['verdict']}**", "",
+             f"- INVALID_DATA: {'あり' if invalid else 'なし'}",
+             f"- 評価基準: {'暫定基準' if policy.get('assumption_status') == 'provisional' else policy.get('assumption_status', '未指定')}"]
+    major = [(scope, item) for scope, item in findings if item["status"] in ("FAIL", "WARN")]
+    lines.append("- 主要なFAIL / WARN: " + ("; ".join(dict.fromkeys(
+        f"{cell(scope)} / {item['metric']} / {item['status']}（{'回帰' if 'regression' in item['kind'] else '閾値'}）"
+        for scope, item in major)) if major else "なし"))
+    problem_endpoints = [name for name, endpoint in endpoints.items() if any(item["status"] in problems for item in endpoint["findings"])]
+    lines.append("- 問題のあるendpoint: " + (", ".join(map(cell, problem_endpoints)) or "なし"))
+    if unevaluated or (comparison and comparison["status"] == "NOT_COMPARABLE") or any(
+        item["kind"] == "endpoint_observation" and item.get("decrease_percent") is None for _, item in findings
+    ):
+        lines.append("- 注意: 未評価・比較不能の項目があります。総合判定だけで全項目を評価済みと判断しないでください。")
+    if (has_baseline or has_endpoint_comparison) and comparison is None:
+        lines.append("- 注意: manifestなしで比較条件未検証です。")
 
-    if endpoints:
-        lines.extend(
-            [
-                "",
-                "## Endpoint analysis",
-                "",
-            ]
-        )
+    section("2. データ品質・評価条件")
+    table(["対象", "metric", "source", "sample", "status", "reason"], [
+        [scope, item["metric"], item.get("source", "未記録"), item.get("sample", "—"), "INVALID_DATA", "無効／算出不可: " + item["reason"]]
+        for scope, item in invalid])
+    if not invalid:
+        lines.append("INVALID_DATAはありません。")
+    evaluation = report["evaluation"]
+    lines.append(f"- Warm-up seconds: {evaluation['warmup_seconds']}")
+    for label, excluded_key, reset_key in (
+        ("current", "excluded_rows", "stats_reset_detected"),
+        ("baseline", "baseline_excluded_rows", "baseline_stats_reset_detected"),
+    ):
+        excluded, reset = evaluation.get(excluded_key), evaluation.get(reset_key)
+        lines.append(f"- {label} 除外行数: {excluded if excluded is not None else '未指定'}")
+        message = "未指定" if reset is None else (
+            "検出あり（累積requestsの減少を確認）" if reset else
+            "未検出（累積percentile・件数にwarm-upが残っている可能性）")
+        lines.append(f"- {label} statistics reset: {message}")
+    if evaluation.get("baseline_stats_reset_detected") is not None and evaluation["stats_reset_detected"] != evaluation["baseline_stats_reset_detected"]:
+        lines.append("- 注意: current / baselineでreset検出状況が異なります。回帰評価にはデータ品質上の留保があります。")
 
-        for endpoint_name, endpoint in endpoints.items():
-            lines.extend(
-                [
-                    f"### {endpoint_name}",
-                    "",
-                    f"- Requests: {format_measurement(endpoint['requests'], '.0f')}",
-                    f"- Failures: {format_measurement(endpoint['failures'], '.0f')}",
-                    (
-                        "- Error rate: "
-                        f"{format_measurement(endpoint['error_rate_percent'], '.3f')}%"
-                    ),
-                    f"- p95: {format_measurement(endpoint['p95_ms'], '.2f')} ms",
-                    f"- p99: {format_measurement(endpoint['p99_ms'], '.2f')} ms",
-                    (
-                        "- Throughput: "
-                        f"{format_measurement(endpoint['rps'], '.2f')} requests/s"
-                    ),
-                    "",
-                ]
-            )
+    section("3. 閾値違反・リソース警告")
+    lines.extend(["最終累積エラー率がエラー率の判定値です。peak observed error rateは診断用です。",
+                  "判定は丸め前のraw値を使用し、表示値は丸めています。", ""])
+    threshold_problems = [item for item in report["findings"] if item["kind"] == "threshold" and item["status"] in ("FAIL", "WARN")]
+    table(["metric", "actual", "threshold", "status"], [[item["metric"], item["actual"], item["limit"], item["status"]] for item in threshold_problems])
+    if not threshold_problems:
+        lines.append("確認された全体の閾値FAIL / リソースWARNはありません（未評価・不正データは別記）。")
+    lines.append(f"- Final cumulative error rate: {format_measurement(report['summary']['latest']['error_rate_percent'], '.3f')}%")
 
-            for item in endpoint["findings"]:
-                if item["status"] == "INVALID_DATA":
-                    lines.append(f"- INVALID_DATA: {item['metric']} 無効／算出不可 ({item['reason']})")
-                elif item["kind"] == "endpoint_threshold":
-                    lines.append(
-                        f"- {item['status']}: "
-                        f"{item['metric']}={item['actual']} "
-                        f"(limit {item['limit']})"
-                    )
+    section("4. baseline回帰")
+    if comparison:
+        lines.append(f"- 比較状態: {comparison['status']} — {cell(comparison['message'])}")
+    elif has_baseline or has_endpoint_comparison:
+        lines.append("- 比較状態: manifestなしで比較条件未検証")
+    else:
+        lines.append("- 比較状態: baseline未指定")
+    if not has_baseline and has_endpoint_comparison:
+        lines.append("- 全体baselineは未指定。endpointの比較情報のみあります。")
+    if comparison and comparison["status"] == "NOT_COMPARABLE":
+        lines.append("- 全体・endpointの回帰判定は抑止されています。")
+    regressions = [item for item in report["findings"] if item["kind"] == "regression"]
+    lines.append("")
+    table(["metric", "baseline → current", "変化率", "上限", "status", "reason"], [comparison_row(item) for item in sorted(regressions, key=lambda item: item["status"] == "PASS")])
+    if unevaluated:
+        lines.append("- NOT_EVALUATED: baseline値0等により相対比較できない項目があります（理由は各比較表）。")
 
-                elif item["status"] == "NOT_EVALUATED":
-                    lines.append(
-                        f"- NOT_EVALUATED: "
-                        f"{item['metric']} "
-                        f"({item['reason']})"
-                    )
+    section("5. endpoint別問題")
+    if not problem_endpoints:
+        lines.append("問題findingのあるendpointはありません。正常endpointは参考情報に要約します。")
+    for name in sorted(problem_endpoints, key=lambda name: min(
+        {"FAIL": 0, "INVALID_DATA": 1, "WARN": 2, "NOT_EVALUATED": 3}.get(item["status"], 4)
+        for item in endpoints[name]["findings"]
+    )):
+        lines.extend([f"### {cell(name)}", ""])
+        items = endpoints[name]["findings"]
+        table(["metric", "actual", "threshold", "status"], [[item["metric"], item["actual"], item["limit"], item["status"]]
+              for item in items if item["kind"] == "endpoint_threshold" and item["status"] in problems])
+        table(["metric", "source", "status", "reason"], [[item["metric"], item.get("source", "未記録"), item["status"], "無効／算出不可: " + item["reason"]]
+              for item in items if item["status"] == "INVALID_DATA"])
+        table(["metric", "baseline → current", "変化率", "上限", "status", "reason"], [comparison_row(item)
+              for item in items if item["kind"] == "endpoint_regression" and item["status"] in problems])
 
-                elif (
-                    item["kind"] == "endpoint_observation"
-                    and item["metric"] == "rps"
-                ):
-                    if item["decrease_percent"] is None:
-                        lines.append(
-                            f"- INFO: rps comparison unavailable "
-                            f"({item['reason']})"
-                        )
-                    else:
-                        lines.append(
-                            f"- INFO: rps decreased "
-                            f"{item['decrease_percent']}% "
-                            f"({item['baseline']} -> "
-                            f"{item['current']}); "
-                            f"informational only"
-                        )
+    section("6. 参考情報")
+    summary = report["summary"]
+    lines.extend([f"- Peak RPS: {format_measurement(summary['peak']['rps'], '.2f')} requests/s",
+                  f"- Median throughput: {format_measurement(summary['median']['rps'], '.2f')} requests/s",
+                  f"- Peak observed error rate: {format_measurement(summary['peak']['error_rate_percent'], '.3f')}%",
+                  f"- Samples: {summary['samples']}",
+                  f"- Peak users: {format_measurement(summary['peak']['users'], '.0f')}",
+                  f"- policy_id: {cell(policy.get('policy_id', '未指定'))}",
+                  f"- assumption_status: {cell(policy.get('assumption_status', '未指定'))}",
+                  f"- report_schema_version: {report['report_schema_version']}"])
+    for metric in ("cpu_percent", "memory_percent"):
+        if summary["peak"][metric] is None:
+            state = "無効／算出不可" if any(scope == "全体" and item["metric"] == metric and item.get("source", "current") == "current" for scope, item in invalid) else "未提供（評価省略）"
+            lines.append(f"- {metric}: {state}")
+    lines.append("")
+    table(["正常な全体指標", "actual", "threshold", "status"], [[item["metric"], item["actual"], item["limit"], item["status"]]
+          for item in report["findings"] if item["kind"] == "threshold" and item["status"] == "PASS"])
+    table(["正常endpoint", "要約"], [[name, "問題findingなし（比較未実施は評価済みを意味しません）"] for name in endpoints if name not in problem_endpoints])
+    table(["endpoint RPS INFO", "baseline → current", "低下率", "備考"], [
+        [scope, f"{item.get('baseline')} → {item.get('current')}",
+         "比較不能" if item.get("decrease_percent") is None else f"{item['decrease_percent']}%",
+         item.get("reason", "参考情報のみ")]
+        for scope, item in findings if item["kind"] == "endpoint_observation" and item["status"] == "INFO"])
+    for limitation in report.get("limitations", []):
+        lines.append(f"- {cell(limitation)}")
 
-                else:
-                    lines.append(
-                        f"- {item['status']}: "
-                        f"{item['metric']} changed "
-                        f"{item['change_percent']}% "
-                        f"({item['baseline']} -> "
-                        f"{item['current']}; "
-                        f"limit "
-                        f"{item['limit_percent']}%)"
-                    )
-
-
-    if report["comparability"]:
-        lines.extend(
-            [
-                "",
-                "## Baseline comparability",
-                "",
-            ]
-        )
-
-        lines.append(
-            f"- {report['comparability']['status']}: "
-            f"{report['comparability']['message']}"
-        )
-
-        mismatches = report["comparability"].get("mismatches", [])
-        for mismatch in mismatches:
-            lines.append(f"- Mismatch: {mismatch}")
-
-    lines.extend(
-        [
-            "",
-            "## Limitations",
-            "",
-        ]
-    )
-
-    for limitation in report["limitations"]:
-        lines.append(f"- {limitation}")
-
-    lines.extend(
-        [
-            "",
-            "## AI review instructions",
-            "",
-            (
-                "Using only the evidence above, explain observed trends "
-                "and risks. Treat causes as hypotheses, state what "
-                "additional application/DB/infrastructure evidence would "
-                "confirm them, and require human review before a release "
-                "decision."
-            ),
-        ]
-    )
-
+    section("7. 追加確認事項")
+    if invalid:
+        lines.append("- INVALID_DATAの対象metric・source・reasonに沿って、元CSVや収集処理を確認してください。")
+    if comparison and comparison["status"] == "NOT_COMPARABLE":
+        lines.append("- manifest、対象環境、負荷条件の不一致を確認してください。")
+    elif (has_baseline or has_endpoint_comparison) and comparison is None:
+        lines.append("- manifestが未提供のため、baselineとの比較条件を確認してください。")
+    for label, key in (("current", "stats_reset_detected"), ("baseline", "baseline_stats_reset_detected")):
+        if evaluation.get(key) is False:
+            lines.append(f"- {label}: Locustの統計リセット実施状況を確認してください。")
+    if unevaluated or any(item["kind"] == "endpoint_observation" and item.get("decrease_percent") is None for _, item in findings):
+        lines.append("- 未評価・比較不能の項目について、baseline値や比較条件を確認してください。")
+    lines.append("- 原因仮説の整理はCodex / AIレビュー側で行い、性能評価の承認・リリース可否は人間が判断してください。")
     return "\n".join(lines)
 
 

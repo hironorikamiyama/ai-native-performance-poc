@@ -54,7 +54,7 @@ def test_error_rate_boundary_uses_raw_value_in_report(
     assert serialized["verdict"] == expected_status
     markdown = MODULE.render_markdown(report)
     assert "Final cumulative error rate: 1.000%" in markdown
-    assert f"{expected_status}: error_rate_percent=1.0 (limit 1.0)" in markdown
+    assert f"| error_rate_percent | 1.0 | 1.0 | {expected_status} |" in markdown
 
 
 def test_degraded_run_fails_and_detects_regression() -> None:
@@ -804,3 +804,166 @@ def test_cli_writes_strict_json_and_invalid_markdown(quality_inputs, tmp_path):
     markdown = output_md.read_text()
     assert "INVALID_DATA" in markdown and "無効／算出不可" in markdown
     assert "requests is zero" in markdown
+
+
+def markdown_section(markdown, number):
+    return markdown.split(f"## {number}. ", 1)[1].split("\n## ", 1)[0]
+
+
+def test_markdown_summary_exposes_failure_and_invalid_data(quality_inputs):
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([{"p99_ms": 600}]), policy,
+                                 endpoint_path=endpoint({"rps": -1}))
+    markdown = MODULE.render_markdown(report)
+    summary = markdown_section(markdown, 1)
+    assert "総合verdict: FAIL" in summary
+    assert "INVALID_DATA: あり" in summary
+    assert "p99_ms / FAIL" in summary
+    assert "GET /items" in summary
+    assert "暫定基準" in summary
+    assert "report_schema_version" not in summary
+    assert "report_schema_version: 1.2" in markdown_section(markdown, 6)
+    assert "判定は丸め前のraw値を使用し、表示値は丸めています" in markdown
+    assert "rps | current | INVALID_DATA" in markdown_section(markdown, 5)
+
+
+def test_markdown_invalid_sources_and_escaping(quality_inputs):
+    import copy
+    policy, history, endpoint = quality_inputs
+    report = MODULE.build_report(history([{"p95_ms": float("nan")}]), policy,
+                                 baseline_path=history([{"p99_ms": float("nan")}], "baseline.csv"),
+                                 endpoint_path=endpoint({"rps": -1}),
+                                 baseline_endpoint_path=endpoint({"rps": float("inf")}, "baseline-endpoint.csv"))
+    report["endpoints"]["GET /items|detail"] = report["endpoints"].pop("GET /items")
+    report["endpoints"]["GET /items|detail"]["findings"][0]["reason"] = "bad|value\nsecond line"
+    before = copy.deepcopy(report)
+    markdown = MODULE.render_markdown(report)
+    quality = markdown_section(markdown, 2)
+    assert "| p95_ms | current |" in quality
+    assert "| p99_ms | baseline |" in quality
+    assert "| rps | current |" in quality
+    assert "| rps | baseline |" in quality
+    assert "GET /items\\|detail" in markdown
+    assert "bad\\|value<br>second line" in quality
+    assert report == before
+    # Unknown source is not silently relabeled as current.
+    assert "未記録" in quality
+
+
+def test_markdown_no_baseline_and_unverified_baseline(quality_inputs):
+    policy, history, _ = quality_inputs
+    current = history([{}])
+    markdown = MODULE.render_markdown(MODULE.build_report(current, policy))
+    assert "比較状態: baseline未指定" in markdown_section(markdown, 4)
+    assert "baseline 除外行数: 未指定" in markdown
+    assert "baseline statistics reset: 未指定" in markdown
+    assert "None" not in markdown
+    report = MODULE.build_report(current, policy, baseline_path=history([{}], "baseline.csv"))
+    markdown = MODULE.render_markdown(report)
+    assert "manifestなしで比較条件未検証" in markdown_section(markdown, 1)
+    assert "manifestなしで比較条件未検証" in markdown_section(markdown, 4)
+    assert "baseline → current" in markdown_section(markdown, 4)
+
+
+def test_markdown_not_comparable(quality_inputs, tmp_path):
+    policy, history, endpoint = quality_inputs
+    current_manifest = tmp_path / "current.json"
+    baseline_manifest = tmp_path / "baseline.json"
+    current_manifest.write_text(json.dumps({"target": "current"}))
+    baseline_manifest.write_text(json.dumps({"target": "baseline"}))
+    report = MODULE.build_report(history([{}]), policy,
+        baseline_path=history([{}], "baseline.csv"),
+        manifest_path=current_manifest, baseline_manifest_path=baseline_manifest,
+        endpoint_path=endpoint({}), baseline_endpoint_path=endpoint({}, "baseline-endpoint.csv"))
+    markdown = MODULE.render_markdown(report)
+    assert "未評価・比較不能" in markdown_section(markdown, 1)
+    assert "比較状態: NOT_COMPARABLE" in markdown_section(markdown, 4)
+    assert "回帰判定は抑止" in markdown_section(markdown, 4)
+    assert "manifest、対象環境、負荷条件" in markdown_section(markdown, 7)
+
+
+def test_markdown_comparable_and_reset_difference(quality_inputs, tmp_path):
+    policy, history, _ = quality_inputs
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"target": "same"}))
+    report = MODULE.build_report(history([{}, {"requests": 10}]), policy,
+        baseline_path=history([{}, {}], "baseline.csv"),
+        manifest_path=manifest, baseline_manifest_path=manifest)
+    markdown = MODULE.render_markdown(report)
+    assert "比較状態: COMPARABLE" in markdown_section(markdown, 4)
+    quality = markdown_section(markdown, 2)
+    assert "current statistics reset: 検出あり" in quality
+    assert "baseline statistics reset: 未検出" in quality
+    assert "reset検出状況が異なります" in quality
+    checks = markdown_section(markdown, 7)
+    assert "baseline: Locust" in checks
+    assert "current: Locust" not in checks
+    report["evaluation"]["stats_reset_detected"] = False
+    report["evaluation"]["baseline_stats_reset_detected"] = True
+    quality = markdown_section(MODULE.render_markdown(report), 2)
+    assert "current statistics reset: 未検出" in quality
+    assert "baseline statistics reset: 検出あり" in quality
+
+
+def test_markdown_endpoint_priorities_and_info(quality_inputs):
+    import copy
+    policy, history, endpoint = quality_inputs
+    zeros = {"p95_ms": 0, "p99_ms": 0, "rps": 0}
+    report = MODULE.build_report(history([{}]), policy,
+        baseline_path=history([zeros], "baseline.csv"),
+        endpoint_path=endpoint({}), baseline_endpoint_path=endpoint(zeros, "baseline-endpoint.csv"))
+    normal = copy.deepcopy(report["endpoints"]["GET /items"])
+    normal["findings"] = [item for item in normal["findings"] if item["status"] == "PASS"]
+    report["endpoints"] = {"GET /normal": normal, **report["endpoints"]}
+    markdown = MODULE.render_markdown(report)
+    assert "未評価・比較不能" in markdown_section(markdown, 1)
+    assert "NOT_EVALUATED" in markdown_section(markdown, 4)
+    problems = markdown_section(markdown, 5)
+    assert "NOT_EVALUATED" in problems
+    assert "GET /normal" not in problems
+    assert "INFO" not in problems
+    assert markdown.index("### GET /items") < markdown.index("| GET /normal |")
+    references = markdown_section(markdown, 6)
+    assert "endpoint RPS INFO" in references
+    assert "比較不能" in references
+    assert "baseline値や比較条件" in markdown_section(markdown, 7)
+    # A usual nonzero INFO comparison also belongs only in reference information.
+    info = next(item for item in report["endpoints"]["GET /items"]["findings"] if item["status"] == "INFO")
+    info["decrease_percent"] = 40
+    markdown = MODULE.render_markdown(report)
+    assert "40%" in markdown_section(markdown, 6)
+    assert "40%" not in markdown_section(markdown, 5)
+
+
+def test_markdown_sections_optional_metrics_and_no_hypotheses(quality_inputs):
+    policy, _, _ = quality_inputs
+    report = MODULE.build_report(ROOT / "data" / "locust_history_sample.csv", policy)
+    markdown = MODULE.render_markdown(report)
+    headings = [line for line in markdown.splitlines() if line.startswith("## ")]
+    assert headings == ["## 1. 総合判定", "## 2. データ品質・評価条件", "## 3. 閾値違反・リソース警告",
+                        "## 4. baseline回帰", "## 5. endpoint別問題", "## 6. 参考情報", "## 7. 追加確認事項"]
+    assert "cpu_percent: 未提供（評価省略）" in markdown_section(markdown, 6)
+    assert "memory_percent: 未提供（評価省略）" in markdown_section(markdown, 6)
+    checks = markdown_section(markdown, 7)
+    assert not any(word in checks for word in ("DB", "CPU", "ネットワーク", "依存サービス"))
+
+
+def test_markdown_table_delimiters_have_consistent_spaces():
+    import re
+    report = MODULE.build_report(
+        ROOT / "data" / "degraded.csv", ROOT / "config" / "thresholds.json",
+        baseline_path=ROOT / "data" / "baseline.csv",
+    )
+    markdown = MODULE.render_markdown(report)
+    regression = markdown_section(markdown, 4)
+    assert "| p95_ms | 105.0 → 380.0 | 261.9%（変化率） | 20.0% | FAIL |  |" in regression
+    for line in markdown.splitlines():
+        if line.startswith("| "):
+            delimiters = list(re.finditer(r"(?<!\\)\|", line))
+            assert line.endswith(" |")
+            for delimiter in delimiters:
+                index = delimiter.start()
+                if index > 0:
+                    assert line[index - 1] == " "
+                if index < len(line) - 1:
+                    assert line[index + 1] == " "
